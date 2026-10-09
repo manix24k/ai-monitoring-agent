@@ -2,55 +2,29 @@
 """
 Root Cause Analysis for AI Monitoring Agent
 """
-import ollama
 from typing import Any, Dict, List, Tuple
 import json
 import os
 import re
-import logging
-
-logger = logging.getLogger(__name__)
+from llm_client import LLMClient
 
 class RootCauseAnalyzer:
     def __init__(self):
-        # Initialize Ollama client for Phi-3 model
-        try:
-            # Test connection to Ollama
-            response = ollama.list()
-            print("Ollama connection successful")
-            self.ollama_client = ollama
-        except Exception as e:
-            print(f"Warning: Could not connect to Ollama: {e}")
-            self.ollama_client = None
-        self.model_disabled = False
+        self.llm_client = LLMClient()
 
     def is_llm_available(self) -> bool:
-        """Check whether Ollama-backed LLM is available."""
-        return self.ollama_client is not None and not self.model_disabled
-
-    def _safe_generate(self, prompt: str, temperature: float = 0.4):
-        """Generate via Ollama and disable model temporarily on memory errors."""
-        if not self.ollama_client or self.model_disabled:
-            raise RuntimeError("LLM unavailable")
-
-        response = self.ollama_client.generate(
-            model=os.getenv("OLLAMA_MODEL", "codellama:7b"),
-            prompt=prompt,
-            stream=False,
-            options={
-                "temperature": temperature,
-                "top_p": 0.9,
-                "stop": ["\n\n"]
-            }
+        """Check whether any LLM backend is available."""
+        return self.llm_client.is_remote_available() or bool(
+            self.llm_client.ollama_enabled and self.llm_client.ollama_model
         )
 
-        if isinstance(response, dict):
-            error_text = str(response.get('error', '')).lower()
-            if 'more system memory' in error_text or 'model request too large' in error_text:
-                self.model_disabled = True
-                raise RuntimeError("LLM disabled due to memory constraints")
-
-        return response
+    def _safe_generate(self, prompt: str, temperature: float = 0.4):
+        """Generate via configured LLM backend with safe fallback behavior."""
+        text = self.llm_client.generate(prompt=prompt, temperature=temperature)
+        if not text:
+            reason = getattr(self.llm_client, 'last_error', '')
+            raise RuntimeError(f"LLM unavailable ({reason})" if reason else "LLM unavailable")
+        return text
             
     def _extract_exact_issues(self, anomalies: List[Dict], logs_traces: Dict) -> List[str]:
         """Extract exact issues from anomalies and logs"""
@@ -302,8 +276,8 @@ class RootCauseAnalyzer:
         return ""
     
     def _summarize_anomalies(self, text: str) -> str:
-        """Generate summary of anomalies using Phi-3 model via Ollama"""
-        if not self.ollama_client or len(text) < 50:
+        """Generate summary of anomalies using configured LLM backend."""
+        if len(text) < 50:
             return f"Anomalous behavior detected: {text[:200]}..."
             
         try:
@@ -314,24 +288,21 @@ class RootCauseAnalyzer:
             # Create prompt for summarization
             prompt = f"Summarize the following anomalies in a concise technical summary:\n\n{text}"
             
-            # Generate summary using Phi-3 model
-            response = self._safe_generate(prompt=prompt, temperature=0.3)
-            
-            summary = response['response'].strip()
+            summary = self._safe_generate(prompt=prompt, temperature=0.3).strip()
             return summary if summary else f"Anomalous behavior detected: {text[:200]}..."
         except Exception as e:
-            print(f"Error summarizing anomalies with Phi-3: {e}")
+            print(f"Error summarizing anomalies with LLM: {e}")
             return f"Anomalous behavior detected: {text[:200]}..."
             
     def _analyze_context(self, logs_traces: Dict) -> Dict:
-        """Analyze logs and traces for root cause patterns using Phi-3 model"""
+        """Analyze logs and traces for root cause patterns using configured LLM backend"""
         analysis = {
             'causes': [],
             'recommendations': [],
             'confidence': 0.7  # Higher baseline confidence with LLM
         }
         
-        if not logs_traces or not self.ollama_client:
+        if not logs_traces:
             analysis['causes'].append("No contextual data available for root cause analysis")
             return analysis
             
@@ -379,7 +350,7 @@ class RootCauseAnalyzer:
         # If we have trace information, mention it in the prompt
         trace_note = "Also analyze the trace information to identify cross-service call patterns and latency issues." if trace_info else ""
         
-        # Use Phi-3 to analyze logs and traces for root causes
+        # Use LLM to analyze logs and traces for root causes
         try:
             prompt = f"""Analyze the following system monitoring data and identify the most likely root causes of the anomalies. 
             Focus on error patterns, exceptions, unusual behaviors, and cross-service communication issues. 
@@ -394,16 +365,16 @@ class RootCauseAnalyzer:
             response = self._safe_generate(prompt=prompt, temperature=0.4)
             
             # Parse root causes from response
-            root_causes = [line.strip() for line in response['response'].strip().split('\n') if line.strip()]
+            root_causes = [line.strip() for line in response.strip().split('\n') if line.strip()]
             analysis['causes'] = root_causes[:3]  # Limit to top 3 causes
             
         except Exception as e:
-            print(f"Error analyzing context with Phi-3: {e}")
+            print(f"Error analyzing context with LLM: {e}")
             # Fallback to pattern-based analysis
             error_patterns = self._extract_error_patterns(log_messages)
             analysis['causes'].extend(error_patterns)
             
-        # Generate recommendations using Phi-3
+        # Generate recommendations using LLM
         if analysis['causes']:
             try:
                 causes_text = "\n".join(analysis['causes'])
@@ -417,11 +388,11 @@ class RootCauseAnalyzer:
                 response = self._safe_generate(prompt=prompt, temperature=0.5)
                 
                 # Parse recommendations from response
-                recommendations = [line.strip() for line in response['response'].strip().split('\n') if line.strip()]
+                recommendations = [line.strip() for line in response.strip().split('\n') if line.strip()]
                 analysis['recommendations'] = recommendations[:3]  # Limit to top 3 recommendations
                 
             except Exception as e:
-                print(f"Error generating recommendations with Phi-3: {e}")
+                print(f"Error generating recommendations with LLM: {e}")
                 # Fallback to rule-based recommendations
                 recommendations = self._generate_recommendations(analysis['causes'])
                 analysis['recommendations'].extend(recommendations)
@@ -497,90 +468,152 @@ class RootCauseAnalyzer:
             
         return recommendations
 
-    def generate_code_fix(self, issue_description: str, repo_files: Dict[str, str], service_name: str) -> Dict[str, Any]:
-        """Use Ollama to generate code fix for any issue automatically."""
-        if not self.ollama_client:
-            logger.warning("Ollama not available - cannot generate code fix")
-            return {'ok': False, 'reason': 'Ollama not available', 'fixes': []}
+    def _parse_first_json_object(self, text: str) -> Dict[str, Any]:
+        raw = str(text or '').strip()
+        if not raw:
+            return {}
+        try:
+            parsed = json.loads(raw)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            pass
 
-        fixes = []
-        
-        # Prepare file context for Ollama
-        file_context = ""
-        for file_path, content in list(repo_files.items())[:10]:  # Limit to 10 files
-            file_context += f"\n\n=== File: {file_path} ===\n{content[:3000]}"  # Limit each file
+        first = raw.find('{')
+        last = raw.rfind('}')
+        if first == -1 or last == -1 or last <= first:
+            return {}
+        candidate = raw[first:last + 1]
+        try:
+            parsed = json.loads(candidate)
+            return parsed if isinstance(parsed, dict) else {}
+        except Exception:
+            return {}
 
-        prompt = f"""You are a senior software engineer. Analyze the issue and the provided source code files.
-Generate a code fix for the following issue:
+    def analyze_troubleshooting_report(self, service: str, namespace: str, report: Dict[str, Any]) -> Dict[str, Any]:
+        """Use LLM to produce evidence-backed RCA from troubleshoot report."""
+        result = {
+            'primary_issue': '',
+            'supporting_evidence': [],
+            'recommendations': [],
+            'confidence': 0.0,
+            'category': 'unknown',
+            'model_used': '',
+            'source': 'deterministic_fallback'
+        }
 
-Issue: {issue_description}
-Service: {service_name}
+        if not isinstance(report, dict):
+            return result
 
-{file_context}
+        # Deterministic evidence extraction first (always available fallback).
+        evidence = []
+        pods = report.get('pods', []) if isinstance(report.get('pods', []), list) else []
+        for pod in pods[:4]:
+            if not isinstance(pod, dict):
+                continue
+            for key in ('log_evidence_line', 'reason', 'restart_cause', 'describe_excerpt', 'event_summary', 'log_previous', 'log_current'):
+                value = str(pod.get(key, '') or '').strip()
+                if not value:
+                    continue
+                compact = re.sub(r'\s+', ' ', value).strip()
+                if compact and compact not in evidence:
+                    evidence.append(compact[:320] + ('...' if len(compact) > 320 else ''))
+                if len(evidence) >= 12:
+                    break
+            if len(evidence) >= 12:
+                break
 
-Instructions:
-1. Analyze the issue and identify the root cause in the code
-2. If this is a code-level issue (not infrastructure like connection refused, network timeout, etc), provide a fix
-3. If this is an infrastructure issue (network, database, cache connection, etc), respond with: INFRASTRUCTURE_ISSUE
-4. Show the exact code to add/replace in this format:
-FILE: <filename>
-POSITION: after line <number> or replace line <number>
-CODE:
-<exact code to add>
+        root_causes = report.get('root_causes', []) if isinstance(report.get('root_causes', []), list) else []
+        for rc in root_causes[:8]:
+            item = re.sub(r'\s+', ' ', str(rc or '')).strip()
+            if item and item not in evidence:
+                evidence.append(item[:320] + ('...' if len(item) > 320 else ''))
 
-If the issue is about a missing enum value, add it to the enum class.
-If the issue is about a missing config/placeholder, suggest adding it to the appropriate config file.
-For other code-level issues, provide the exact code change needed.
+        if evidence:
+            result['supporting_evidence'] = evidence[:8]
+            result['primary_issue'] = evidence[0]
+            result['confidence'] = 0.55
 
-Respond with 1-3 fixes maximum. If infrastructure issue, just write INFRASTRUCTURE_ISSUE"""
+        if not self.is_llm_available():
+            result['recommendations'] = [
+                'Check the first actionable error line and map it to the failing dependency/component',
+                'Validate pod events/restarts and rollout image/config fixes if startup is failing',
+                'Re-run troubleshooting after fix to confirm error signature is gone'
+            ]
+            return result
+
+        prompt = f"""
+You are an SRE root-cause assistant.
+Task: infer the most probable root cause for service {namespace}/{service} using only provided evidence.
+
+Rules:
+1) Prefer concrete runtime faults (exceptions, image pull failures, crash loops, connection refused, timeouts) over generic symptoms.
+2) Do NOT invent facts. If evidence is weak, lower confidence.
+3) Keep output strict JSON with this schema:
+{{
+  "primary_issue": "short single-sentence root cause",
+  "category": "one of runtime_exception|dependency|configuration|resource|network|platform|unknown",
+  "confidence": 0.0,
+  "supporting_evidence": ["evidence line 1", "evidence line 2"],
+  "recommendations": ["action 1", "action 2", "action 3"]
+}}
+
+Troubleshoot summary: {str(report.get('summary', '') or '')}
+Pod status: {str(report.get('status', '') or '')}
+Evidence lines:
+- """ + "\n- ".join(evidence[:12])
 
         try:
-            response = self._safe_generate(prompt=prompt, temperature=0.3)
-            response_text = response.get('response', '')
+            text = self._safe_generate(prompt=prompt, temperature=0.2)
+            parsed = self._parse_first_json_object(text)
+            primary = str(parsed.get('primary_issue', '') or '').strip()
+            category = str(parsed.get('category', '') or '').strip().lower()
+            confidence = parsed.get('confidence', 0.0)
+            llm_evidence = parsed.get('supporting_evidence', []) if isinstance(parsed.get('supporting_evidence', []), list) else []
+            llm_reco = parsed.get('recommendations', []) if isinstance(parsed.get('recommendations', []), list) else []
 
-            # Check if AI says it's an infrastructure issue
-            if 'INFRASTRUCTURE_ISSUE' in response_text.upper():
-                logger.info("AI determined this is an infrastructure issue, not code-level")
-                return {'ok': False, 'reason': 'AI determined infrastructure issue (not code-level)', 'fixes': [], 'is_infrastructure': True}
+            if primary:
+                result['primary_issue'] = primary
+            if category:
+                result['category'] = category
+            try:
+                result['confidence'] = max(0.0, min(1.0, float(confidence)))
+            except Exception:
+                pass
 
-            # Parse fixes from response
-            current_file = None
-            current_position = None
-            current_code = []
-            in_code_block = False
+            sanitized_evidence = []
+            for item in llm_evidence[:6]:
+                line = re.sub(r'\s+', ' ', str(item or '')).strip()
+                if line and line not in sanitized_evidence:
+                    sanitized_evidence.append(line[:320] + ('...' if len(line) > 320 else ''))
+            if sanitized_evidence:
+                result['supporting_evidence'] = sanitized_evidence
 
-            for line in response_text.split('\n'):
-                if line.startswith('FILE:'):
-                    if current_file and current_code:
-                        fixes.append({
-                            'file': current_file,
-                            'position': current_position,
-                            'code': '\n'.join(current_code)
-                        })
-                    current_file = line.replace('FILE:', '').strip()
-                    current_code = []
-                    in_code_block = False
-                elif line.startswith('POSITION:'):
-                    current_position = line.replace('POSITION:', '').strip()
-                elif line.strip() == 'CODE:':
-                    in_code_block = True
-                elif in_code_block and line.strip():
-                    current_code.append(line)
+            sanitized_reco = []
+            for item in llm_reco[:4]:
+                line = re.sub(r'\s+', ' ', str(item or '')).strip()
+                if line and line not in sanitized_reco:
+                    sanitized_reco.append(line)
+            if sanitized_reco:
+                result['recommendations'] = sanitized_reco
 
-            if current_file and current_code:
-                fixes.append({
-                    'file': current_file,
-                    'position': current_position,
-                    'code': '\n'.join(current_code)
-                })
+            if not result['recommendations']:
+                result['recommendations'] = [
+                    'Validate the top evidence line in pod logs/events and confirm exact failing component',
+                    'Apply targeted fix (dependency/config/resource) and redeploy impacted pod',
+                    'Verify with fresh logs and error-rate drop in next 5 minutes'
+                ]
 
-            if fixes:
-                logger.info("AI generated %d code fix(es) for this issue", len(fixes))
-                return {'ok': True, 'fixes': fixes, 'reason': ''}
-            else:
-                logger.warning("AI could not generate any code fix for: %s", issue_description[:100])
-                return {'ok': False, 'reason': 'AI could not parse fix from response', 'fixes': []}
-
-        except Exception as e:
-            logger.error("Ollama fix generation failed: %s", e)
-            return {'ok': False, 'reason': f'Ollama fix generation failed: {e}', 'fixes': []}
+            result['model_used'] = self.llm_client.ollama_model or self.llm_client.model
+            result['source'] = 'llm'
+            if not result['primary_issue'] and result['supporting_evidence']:
+                result['primary_issue'] = result['supporting_evidence'][0]
+            if result['confidence'] <= 0.0:
+                result['confidence'] = 0.65
+            return result
+        except Exception:
+            result['recommendations'] = [
+                'Correlate top log evidence with pod restart/event timeline',
+                'Validate dependency reachability and runtime configuration for this service',
+                'Re-run troubleshooting after patch and confirm issue signature is absent'
+            ]
+            return result

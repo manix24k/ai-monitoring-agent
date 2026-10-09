@@ -1,0 +1,45 @@
+.dashboard-header {
+    background: linear-gradient(135deg, #6a11cb 0%, #2575fc 100%);
+    color: white;
+    padding: 2rem 0;
+    margin-bottom: 2rem;
+}
+
+.metric-card {
+    border-radius: 10px;
+    box-shadow: 0 4px 6px rgba(0, 0, 0, 0.1);
+    transition: transform 0.3s ease;
+}
+
+.metric-card:hover {
+    transform: translateY(-5px);
+}
+
+.chart-container {
+    position: relative;
+    height: 300px;
+}
+
+.incident-row.active {
+    background-color: #fff3cd;
+}
+
+.incident-row.resolved {
+    background-color: #d4edda;
+}
+
+.incident-row.critical {
+    background-color: #f8d7da;
+}
+
+.incident-row.warning {
+    background-color: #fff3cd;
+}
+
+.btn-outline-light {
+    border-color: rgba(255, 255, 255, 0.5);
+}
+
+.btn-outline-light:hover {
+    background-color: rgba(255, 255, 255, 0.1);
+}

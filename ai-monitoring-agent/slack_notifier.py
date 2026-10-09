@@ -1,15 +1,23 @@
 #!/usr/bin/env python3
 """
 Slack Notification for AI Monitoring Agent
+Supports Slack Bot Token (xoxb-...) via chat.postMessage API.
 """
 import requests
 import json
-from typing import Dict, List
+from typing import Dict, List, Optional
 import os
 
+SLACK_API_POST = "https://slack.com/api/chat.postMessage"
+
+
 class SlackNotifier:
-    def __init__(self, webhook_url: str):
+    def __init__(self, webhook_url: str = "", bot_token: str = "", channel: str = ""):
         self.webhook_url = webhook_url
+        self.bot_token = bot_token.strip()
+        self.channel = channel.strip()
+        # Prefer bot token when available
+        self._use_bot_api = bool(self.bot_token and self.channel)
         
     def send_alert(self, anomalies: List[Dict], root_cause: Dict):
         """Send detailed alert to Slack"""
@@ -243,15 +251,161 @@ class SlackNotifier:
             "username": "AI Monitoring Agent"
         }
         
+    def send_codexa_service_report(self, service: str, namespace: str,
+                                    issues_with_fixes: list,
+                                    pr_urls: dict = None):
+        """Send one consolidated code-fix report triggered by Generate PR."""
+        if not issues_with_fixes:
+            return
+
+        import logging as _log
+        pr_urls = pr_urls or {}
+        total = len(issues_with_fixes)
+        first_pr_url = next(iter(pr_urls.values()), "")
+
+        # ── Header ──────────────────────────────────────────────────────────
+        blocks = [
+            {
+                "type": "header",
+                "text": {"type": "plain_text", "text": f"🤖 CodeXA — PR Created: {service}", "emoji": True}
+            },
+            {
+                "type": "section",
+                "fields": [
+                    {"type": "mrkdwn", "text": f"*Service:*\n`{service}`"},
+                    {"type": "mrkdwn", "text": f"*Namespace:*\n`{namespace}`"},
+                    {"type": "mrkdwn", "text": f"*Issues Fixed:*\n`{total}`"},
+                    {"type": "mrkdwn", "text": f"*Status:*\n✅ PR Raised"},
+                ]
+            },
+        ]
+
+        if first_pr_url:
+            blocks.append({
+                "type": "section",
+                "text": {"type": "mrkdwn", "text": f":merged: *Pull Request:* <{first_pr_url}|View PR on GitHub>"}
+            })
+
+        blocks.append({"type": "divider"})
+
+        # ── Per-issue details ────────────────────────────────────────────────
+        for idx, (issue, fix) in enumerate(issues_with_fixes, 1):
+            if issue is None:
+                continue
+            if len(blocks) >= 45:
+                remaining = total - idx + 1
+                blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                    "text": f"_…and {remaining} more issue(s) — <{first_pr_url}|see PR for full details>._"}})
+                break
+
+            exc_type = getattr(issue, 'exception_type', '') or 'Unknown Error'
+            if hasattr(exc_type, 'value'):
+                exc_type = exc_type.value
+
+            file_path = (getattr(fix, 'file_path', '') or getattr(issue, 'file_path', '')) if fix else getattr(issue, 'file_path', '')
+            line_num  = (getattr(fix, 'line_number', 0) or getattr(issue, 'line_number', 0)) if fix else getattr(issue, 'line_number', 0)
+            file_ref  = (f"`{file_path}`" + (f"  line *{line_num}*" if line_num else "")) if file_path else "_unknown file_"
+
+            exc_msg   = (getattr(issue, 'exception_message', '') or '')[:400]
+            reasoning = (getattr(fix, 'llm_reasoning', '') or '')[:400] if fix else ''
+            fix_desc  = (getattr(fix, 'fix_description', '') or '')[:300] if fix else ''
+            confidence = getattr(issue, 'confidence', 0) or 0
+            occurrences = getattr(issue, 'occurrence_count', 1) or 1
+
+            # Stack trace — first 3 user-relevant lines
+            stack = (getattr(issue, 'stack_trace', '') or '')
+            stack_lines = [l.strip() for l in stack.splitlines() if l.strip() and '\tat ' in l][:3]
+            stack_excerpt = '\n'.join(stack_lines)
+
+            # Issue summary block
+            summary = (
+                f"*#{idx}  ❌  {exc_type}*\n"
+                f":file_folder: *File:* {file_ref}\n"
+                f":repeat: *Occurrences:* `{occurrences}`   :bar_chart: *Confidence:* `{int(confidence * 100)}%`\n"
+            )
+            if exc_msg:
+                summary += f":speech_balloon: *Message:* {exc_msg}\n"
+
+            blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": summary.strip()}})
+
+            # Stack trace excerpt
+            if stack_excerpt:
+                blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                    "text": f":scroll: *Stack Trace (top frames):*\n```{stack_excerpt}```"}})
+
+            # Root cause + fix description
+            if reasoning or fix_desc:
+                analysis_text = ""
+                if reasoning:
+                    analysis_text += f":mag: *Root Cause:*\n{reasoning}\n"
+                if fix_desc:
+                    analysis_text += f"\n:hammer_and_wrench: *Fix Applied:*\n{fix_desc}"
+                blocks.append({"type": "section", "text": {"type": "mrkdwn", "text": analysis_text.strip()}})
+
+            # Before / After code diff
+            if fix:
+                orig  = (getattr(fix, 'original_code', '') or '').strip()[:350]
+                fixed = (getattr(fix, 'fixed_code', '') or '').strip()[:350]
+                if orig and fixed and orig != fixed:
+                    blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                        "text": f"*Before:*\n```{orig}```\n\n*After (fix):*\n```{fixed}```"}})
+                elif fix_desc and not orig:
+                    blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                        "text": f"_Code diff not available — see PR for changes_"}})
+
+            # Per-issue PR link when there are multiple PRs
+            issue_pr = pr_urls.get(getattr(issue, 'id', ''), '')
+            if issue_pr and issue_pr != first_pr_url:
+                blocks.append({"type": "section", "text": {"type": "mrkdwn",
+                    "text": f":white_check_mark: *PR for this issue:* <{issue_pr}|View PR>"}})
+
+            blocks.append({"type": "divider"})
+
+        # ── Footer ──────────────────────────────────────────────────────────
+        agent_url = os.environ.get("CODEXA_AGENT_URL", "")
+        prefix    = os.environ.get("CODEXA_AGENT_PREFIX", "/ai-agent")
+        dashboard_url = f"{agent_url}{prefix}/codexa" if agent_url else ""
+        footer_parts = [":robot_face: *CodeXA Auto Fix Engine* — fabhotels"]
+        if dashboard_url:
+            footer_parts.append(f"<{dashboard_url}|Open Dashboard>")
+        blocks.append({"type": "context",
+            "elements": [{"type": "mrkdwn", "text": "  |  ".join(footer_parts)}]})
+
+        _log.info(f"[slack] sending PR report for {namespace}/{service} — {total} issue(s) | pr={first_pr_url}")
+        self._send_to_slack({
+            "text": f"CodeXA PR Created — {service} ({total} issue(s) fixed) {first_pr_url}",
+            "blocks": blocks,
+            "icon_emoji": ":robot_face:",
+            "username": "CodeXA",
+        })
+
     def _send_to_slack(self, message: Dict):
-        """Send message to Slack webhook"""
-        try:
+        """Send message via Bot Token (chat.postMessage) or fallback to webhook."""
+        import logging as _log
+        if self._use_bot_api:
+            payload = dict(message)
+            payload["channel"] = self.channel
+            if "blocks" in payload and "text" not in payload:
+                payload["text"] = "AI SRE Agent notification"
+            response = requests.post(
+                SLACK_API_POST,
+                headers={
+                    "Authorization": f"Bearer {self.bot_token}",
+                    "Content-Type": "application/json",
+                },
+                json=payload,
+                timeout=10,
+            )
+            result = response.json()
+            if not result.get("ok"):
+                raise RuntimeError(f"Slack API error: {result.get('error', result)}")
+            _log.info(f"[slack] message sent via bot token to channel {self.channel}")
+        else:
             response = requests.post(
                 self.webhook_url,
                 data=json.dumps(message),
-                headers={'Content-Type': 'application/json'}
+                headers={"Content-Type": "application/json"},
+                timeout=10,
             )
             response.raise_for_status()
-            print("Alert sent to Slack successfully")
-        except Exception as e:
-            print(f"Error sending alert to Slack: {e}")
+            _log.info("[slack] message sent via webhook")

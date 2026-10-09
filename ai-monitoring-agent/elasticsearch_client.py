@@ -70,7 +70,24 @@ class ElasticsearchClient:
                 normalized.append(token)
             else:
                 normalized.append(f"{token}-*")
-        return ','.join(normalized)
+
+        # Avoid oversized HTTP request line when index list is huge.
+        # ES receives index target in URL path and rejects >4096-byte lines.
+        max_url_chars = 3000
+        bounded = []
+        current = 0
+        for token in normalized:
+            piece = len(token) + (1 if bounded else 0)
+            if current + piece > max_url_chars:
+                break
+            bounded.append(token)
+            current += piece
+
+        if not bounded:
+            return fallback
+        if len(bounded) < len(normalized):
+            return fallback
+        return ','.join(bounded)
 
     def is_connected(self) -> bool:
         """Check connectivity with Elasticsearch cluster."""
@@ -343,7 +360,15 @@ class ElasticsearchClient:
                 if t not in deduped:
                     deduped.append(t)
             if deduped:
-                search_index = ",".join(deduped[:300])
+                capped = []
+                current = 0
+                for token in deduped[:300]:
+                    piece = len(token) + (1 if capped else 0)
+                    if current + piece > 3000:
+                        break
+                    capped.append(token)
+                    current += piece
+                search_index = ",".join(capped) if capped else self._index_target(fallback="*-*")
 
         try:
             response = self.es.search(
@@ -776,8 +801,34 @@ class ElasticsearchClient:
             print(f"Error fetching traces: {e}")
             return []
             
+    def list_service_indices(self) -> Dict[str, List[str]]:
+        """Return a dict of service_name → [index_names] by scanning _cat/indices.
+
+        Service name is derived by stripping the trailing date suffix
+        (YYYY.MM.DD or YYYY.MM.DD-N) from each index name.  Only user indices
+        are included (hidden/system indices starting with '.' are skipped).
+        """
+        if not ELASTICSEARCH_AVAILABLE or self.es is None:
+            return {}
+        try:
+            resp = self.es.cat.indices(h="index", s="index", format="json")
+            services: Dict[str, List[str]] = {}
+            for row in resp:
+                idx = str(row.get("index", "") or "").strip()
+                if not idx or idx.startswith("."):
+                    continue
+                # Strip trailing date: service-name-2026.06.24 or service-name-2026.06.24-000001
+                svc = re.sub(r"-\d{4}\.\d{2}\.\d{2}(-\d+)?$", "", idx).strip("-")
+                if svc:
+                    services.setdefault(svc, []).append(idx)
+            return services
+        except Exception as e:
+            import logging as _logging
+            _logging.getLogger("elasticsearch_client").warning(f"list_service_indices failed: {e}")
+            return {}
+
     def search_logs(self, query_string: str, start_time: int, end_time: int,
-                    limit: int = 100) -> List[Dict]:
+                    limit: int = 100, index: str = None) -> List[Dict]:
         """Search logs with a query string"""
         # Check if Elasticsearch is available
         if not ELASTICSEARCH_AVAILABLE or self.es is None:
@@ -803,31 +854,41 @@ class ElasticsearchClient:
                         },
                         {
                             "query_string": {
-                                "query": query_string
+                                "query": query_string,
+                                "allow_leading_wildcard": True,
+                                "default_operator": "OR",
+                                "fields": ["message", "log", "message.keyword", "log.keyword"]
                             }
                         }
                     ]
                 }
             }
             
-            # Execute search
+            # Use caller-supplied index if given; otherwise fall back to
+            # the configured prefix so normal get_logs calls are unchanged.
+            search_index = index if index else self._index_target(fallback="*-*")
+            # Execute search — unmapped_type prevents sort failure when some indices
+            # don't have @timestamp or have it as wrong type.
             response = self.es.search(
-                index=self._index_target(fallback="*-*"),
+                index=search_index,
+                ignore_unavailable=True,
                 body={
                     "query": query,
                     "size": limit,
-                    "sort": [{"@timestamp": {"order": "desc"}}]
+                    "sort": [{"@timestamp": {"order": "desc", "unmapped_type": "date"}}]
                 }
             )
-            
-            # Process results
+
+            # _index is always present on every hit — no special request needed
             logs = []
             for hit in response['hits']['hits']:
                 log_entry = hit['_source']
                 log_entry['_id'] = hit['_id']
+                log_entry['_index'] = hit.get('_index', '')
                 logs.append(log_entry)
                 
             return logs
         except Exception as e:
-            print(f"Error searching logs: {e}")
+            import logging as _logging
+            _logging.getLogger("elasticsearch_client").error(f"search_logs failed (index={search_index!r}): {e}", exc_info=True)
             return []

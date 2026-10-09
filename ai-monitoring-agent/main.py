@@ -9,12 +9,15 @@ import os
 import re
 import hashlib
 import gzip
+import base64
 import shutil
 import subprocess
+from collections import defaultdict
+from concurrent.futures import ThreadPoolExecutor, as_completed
 from urllib.parse import urlparse
 from urllib.parse import quote
 from datetime import datetime, timedelta
-from threading import Thread
+from threading import Thread, RLock
 from typing import Dict, List, Optional, Tuple, Sequence
 from prometheus_client import PrometheusClient
 from elasticsearch_client import ElasticsearchClient
@@ -24,8 +27,60 @@ from slack_notifier import SlackNotifier
 from learning_engine import LearningEngine
 from kubernetes_service_monitor import KubernetesServiceMonitor
 
+try:
+    import redis as redis_lib
+except Exception:
+    redis_lib = None
+
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+
+class ServiceRegistry:
+    """Thread-safe last-known-good service store.
+
+    Registry is merge-only during runtime: new payloads update existing services,
+    but transient empty refreshes never clear previously known services.
+    """
+
+    def __init__(self):
+        self._services: Dict[str, Dict] = {}
+        self._lock = RLock()
+
+    @staticmethod
+    def _service_key(namespace: str, name: str) -> str:
+        ns = str(namespace or '').strip() or 'unknown'
+        svc = str(name or '').strip()
+        return f"{ns}/{svc}" if svc else ''
+
+    def merge_from_status_map(self, status_map: Dict[str, Dict]):
+        if not isinstance(status_map, dict):
+            return
+        with self._lock:
+            for raw_key, svc in status_map.items():
+                if not isinstance(svc, dict):
+                    continue
+                namespace = str(svc.get('namespace', '') or '').strip()
+                name = str(svc.get('name', '') or '').strip()
+                if not name and isinstance(raw_key, str) and '/' in raw_key:
+                    namespace, name = raw_key.split('/', 1)
+                key = self._service_key(namespace, name)
+                if not key:
+                    continue
+                existing = self._services.get(key, {})
+                merged = dict(existing)
+                merged.update(svc)
+                merged['name'] = name or str(existing.get('name', '') or '')
+                merged['namespace'] = namespace or str(existing.get('namespace', '') or 'unknown')
+                self._services[key] = merged
+
+    def get_services_map(self) -> Dict[str, Dict]:
+        with self._lock:
+            return {key: dict(value) for key, value in self._services.items()}
+
+    def is_empty(self) -> bool:
+        with self._lock:
+            return len(self._services) == 0
 
 class AIMonitoringAgent:
     def __init__(self, config_path="config.json"):
@@ -45,8 +100,8 @@ class AIMonitoringAgent:
             self.elasticsearch = ElasticsearchClient(
                 hosts=self.config['elasticsearch']['hosts'],
                 index_prefix=self.config['elasticsearch'].get('index_prefix', 'logs-*'),
-                username=self.config['elasticsearch'].get('username'),
-                password=self.config['elasticsearch'].get('password')
+                username=os.getenv('ELASTICSEARCH_USERNAME', self.config['elasticsearch'].get('username')),
+                password=os.getenv('ELASTICSEARCH_PASSWORD', self.config['elasticsearch'].get('password'))
             )
         else:
             self.elasticsearch = None
@@ -54,8 +109,8 @@ class AIMonitoringAgent:
             
         self.service_monitor = None
         try:
-            monitor_ns = self.config.get('monitoring', {}).get('discovery_namespaces', ['mercury'])
-            default_ns = monitor_ns[0] if isinstance(monitor_ns, list) and monitor_ns else 'mercury'
+            monitor_ns = self.config.get('monitoring', {}).get('discovery_namespaces', ['jupiter', 'venus'])
+            default_ns = monitor_ns[0] if isinstance(monitor_ns, list) and monitor_ns else 'jupiter'
             self.service_monitor = KubernetesServiceMonitor(namespace=default_ns)
             self.service_monitor.apply_runtime_config(self.config)
         except Exception as e:
@@ -76,6 +131,7 @@ class AIMonitoringAgent:
         self.metrics_history = []
         self._selected_services_cache = []
         self._selected_services_cache_ts = None
+        self.service_registry = ServiceRegistry()
         
         # Incident tracking for dashboard
         self.active_incidents = []
@@ -102,6 +158,12 @@ class AIMonitoringAgent:
         self._recent_traces = []
         self._trace_retention_last_run = None
         self._trace_rotation_last_run = None
+        self._snapshot_redis_client = None
+        self._snapshot_redis_lock = RLock()
+        self._snapshot_collector_started = False
+        self._snapshot_collector_lock = RLock()
+        self._live_es_overview_cache = {}
+        self._live_es_overview_cache_ts = {}
 
     def _ensure_default_config_sections(self):
         """Populate missing optional config blocks with safe defaults."""
@@ -161,6 +223,49 @@ class AIMonitoringAgent:
             if generated_monitored:
                 self.config['monitored_services'] = generated_monitored
 
+        monitoring = self.config.get('monitoring')
+        if not isinstance(monitoring, dict):
+            monitoring = {}
+        monitoring.setdefault('discovery_namespaces', ['jupiter', 'venus'])
+        monitoring.setdefault('service_selection_source', 'cluster')
+        monitoring.setdefault('use_static_monitored_services', False)
+        # Always monitor full discovered scope; avoid stale static selections
+        # that can silently exclude unhealthy services from automation.
+        monitoring['use_static_monitored_services'] = False
+        monitoring.setdefault('auto_select_per_namespace', 20)
+        monitoring.setdefault('auto_select_total_limit', 40)
+        monitoring.setdefault('auto_select_cache_seconds', 120)
+        monitoring.setdefault('auto_select_stale_fallback_seconds', 900)
+        monitoring.setdefault('pod_health_workers', 16)
+        monitoring.setdefault('deep_inspection_service_limit', 0)
+        monitoring.setdefault('discovery_cache_seconds', 90)
+        monitoring.setdefault('log_probe_retries', 3)
+        monitoring.setdefault('log_probe_wait_seconds', 1.2)
+        monitoring.setdefault('troubleshoot_log_probe_retries', 5)
+        monitoring.setdefault('troubleshoot_log_probe_wait_seconds', 2.0)
+        monitoring.setdefault('troubleshoot_log_tail_lines', 2000)
+        monitoring.setdefault('troubleshoot_log_since_minutes', 120)
+        monitoring.setdefault('troubleshoot_full_scan_enabled', True)
+        monitoring.setdefault('troubleshoot_full_scan_since_minutes', 5)
+        monitoring.setdefault('troubleshoot_full_scan_timeout_seconds', 45)
+        monitoring.setdefault('service_status_window_cap_minutes', 360)
+        monitoring.setdefault('service_status_window_cap_threshold', 100)
+        monitoring.setdefault('strict_recent_error_max_services', 0)
+        monitoring.setdefault('full_status_cache_seconds', 90)
+        monitoring.setdefault('background_snapshot_enabled', True)
+        monitoring.setdefault('background_snapshot_interval_seconds', 30)
+        monitoring.setdefault('background_snapshot_window_minutes', 30)
+        redis_cache = monitoring.get('redis_cache')
+        if not isinstance(redis_cache, dict):
+            redis_cache = {}
+        redis_cache.setdefault('enabled', bool(os.getenv('REDIS_URL')))
+        redis_cache.setdefault('url', os.getenv('REDIS_URL', 'redis://localhost:6379/0'))
+        redis_cache.setdefault('ttl_seconds', 120)
+        redis_cache.setdefault('connect_timeout_seconds', 1.0)
+        redis_cache.setdefault('socket_timeout_seconds', 1.5)
+        monitoring['redis_cache'] = redis_cache
+        self.config['monitoring'] = monitoring
+
         pr = self.config.get('pr_automation')
         if not isinstance(pr, dict):
             pr = {}
@@ -173,7 +278,18 @@ class AIMonitoringAgent:
         pr.setdefault('fix_mode', 'report')
         pr.setdefault('ignore_issue_patterns', [])
         pr.setdefault('eligibility_mode', 'strict')
-        pr.setdefault('allow_analysis_report_pr', True)
+        pr.setdefault('allow_analysis_report_pr', False)
+        k8s_manifest_repo = pr.get('k8s_manifest_repo')
+        if not isinstance(k8s_manifest_repo, dict):
+            k8s_manifest_repo = {}
+        k8s_manifest_repo.setdefault('repo_name', 'k8s-manifest')
+        k8s_manifest_repo.setdefault('repo_base_url', pr.get('repo_base_url', 'https://github.com/fabhotelstech'))
+        k8s_manifest_repo.setdefault('target_branch', 'azure')
+        k8s_manifest_repo.setdefault('environment_roots', {
+            'jupiter': ['jupiter/java17', 'jupiter/java8', 'jupiter/python', 'jupiter'],
+            'venus': ['venus/java17', 'venus/java8', 'venus/python', 'venus']
+        })
+        pr['k8s_manifest_repo'] = k8s_manifest_repo
         self.config['pr_automation'] = pr
 
     def _load_dependency_map(self):
@@ -189,6 +305,766 @@ class AIMonitoringAgent:
         except Exception as e:
             logger.warning(f"Could not load service dependency map: {e}")
             return {'aliases': {}, 'dependencies': {}}
+
+    def _get_snapshot_redis_client(self):
+        if redis_lib is None:
+            return None
+        with self._snapshot_redis_lock:
+            if self._snapshot_redis_client is not None:
+                return self._snapshot_redis_client
+
+            monitoring_cfg = self.config.get('monitoring', {}) if isinstance(self.config, dict) else {}
+            redis_cfg = monitoring_cfg.get('redis_cache', {}) if isinstance(monitoring_cfg.get('redis_cache', {}), dict) else {}
+            redis_url = os.getenv('REDIS_URL', redis_cfg.get('url', 'redis://localhost:6379/0'))
+            connect_timeout = float(redis_cfg.get('connect_timeout_seconds', 1.0) or 1.0)
+            socket_timeout = float(redis_cfg.get('socket_timeout_seconds', 1.5) or 1.5)
+
+            try:
+                client = redis_lib.Redis.from_url(
+                    redis_url,
+                    socket_connect_timeout=max(0.2, connect_timeout),
+                    socket_timeout=max(0.2, socket_timeout),
+                    decode_responses=False
+                )
+                client.ping()
+                self._snapshot_redis_client = client
+            except Exception as e:
+                logger.warning(f"Snapshot Redis unavailable: {e}")
+                self._snapshot_redis_client = None
+            return self._snapshot_redis_client
+
+    def _write_namespace_snapshot(self, namespace: str, snapshot: Dict, emit_log: bool = True):
+        ns = str(namespace or '').strip().lower()
+        if ns not in {'venus', 'jupiter', 'all'}:
+            return
+        if not isinstance(snapshot, dict):
+            return
+
+        client = self._get_snapshot_redis_client()
+        if client is None:
+            return
+
+        try:
+            monitoring_cfg = self.config.get('monitoring', {}) if isinstance(self.config, dict) else {}
+            latest_ttl = int(monitoring_cfg.get('live_snapshot_latest_ttl_seconds', 45) or 45)
+            stale_ttl = int(monitoring_cfg.get('live_snapshot_stale_ttl_seconds', 300) or 300)
+            latest_ttl = max(15, min(latest_ttl, 300))
+            stale_ttl = max(latest_ttl + 15, min(stale_ttl, 3600))
+
+            raw = json.dumps(snapshot, separators=(',', ':'), ensure_ascii=False).encode('utf-8')
+            compressed = gzip.compress(raw, compresslevel=5)
+            latest_key = f"snapshot:{ns}:latest"
+            stale_key = f"snapshot:{ns}:stale"
+            client.setex(latest_key, latest_ttl, compressed)
+            client.setex(stale_key, stale_ttl, compressed)
+            if emit_log:
+                logger.info(
+                    "[SNAPSHOT] written: %s | services: %s | age: fresh | ttl: %ss/%ss",
+                    ns,
+                    int(snapshot.get('total_services', 0) or 0),
+                    latest_ttl,
+                    stale_ttl,
+                )
+        except Exception as e:
+            logger.warning(f"Failed to write snapshot for {ns}: {e}")
+
+    @staticmethod
+    def _service_name_from_pod(pod: Dict) -> str:
+        metadata = pod.get('metadata', {}) if isinstance(pod.get('metadata', {}), dict) else {}
+        owner_refs = metadata.get('ownerReferences', []) if isinstance(metadata.get('ownerReferences', []), list) else []
+        for owner in owner_refs:
+            if not isinstance(owner, dict):
+                continue
+            owner_kind = str(owner.get('kind', '') or '').strip().lower()
+            owner_name = str(owner.get('name', '') or '').strip()
+            if not owner_name:
+                continue
+            if owner_kind == 'replicaset':
+                return re.sub(r'-[a-f0-9]{8,10}$', '', owner_name)
+            if owner_kind in {'statefulset', 'daemonset', 'deployment'}:
+                return owner_name
+
+        metadata = pod.get('metadata', {}) if isinstance(pod.get('metadata', {}), dict) else {}
+        labels = metadata.get('labels', {}) if isinstance(metadata.get('labels', {}), dict) else {}
+        by_label = str(labels.get('app', '') or labels.get('app.kubernetes.io/name', '') or '').strip()
+        if by_label:
+            return by_label
+
+        pod_name = str(metadata.get('name', '') or '').strip()
+        if not pod_name:
+            return ''
+        parts = pod_name.rsplit('-', 2)
+        return parts[0] if len(parts) >= 3 else pod_name
+
+    @staticmethod
+    def _pod_ready(pod: Dict) -> bool:
+        status = pod.get('status', {}) if isinstance(pod.get('status', {}), dict) else {}
+        conditions = status.get('conditions', []) if isinstance(status.get('conditions', []), list) else []
+        for cond in conditions:
+            if not isinstance(cond, dict):
+                continue
+            if str(cond.get('type', '')).strip() == 'Ready' and str(cond.get('status', '')).strip() == 'True':
+                return True
+        return False
+
+    @staticmethod
+    def _pod_issue_reason(pod: Dict) -> str:
+        status = pod.get('status', {}) if isinstance(pod.get('status', {}), dict) else {}
+        phase = str(status.get('phase', '') or '').strip().lower()
+        reason = str(status.get('reason', '') or '').strip()
+
+        if not reason and phase in {'pending', 'failed', 'unknown'}:
+            conditions = status.get('conditions', []) if isinstance(status.get('conditions', []), list) else []
+            for cond in conditions:
+                if not isinstance(cond, dict):
+                    continue
+                cond_status = str(cond.get('status', '') or '').strip().lower()
+                if cond_status == 'true':
+                    continue
+                cond_reason = str(cond.get('reason', '') or '').strip()
+                cond_msg = str(cond.get('message', '') or '').strip()
+                merged = ': '.join([part for part in [cond_reason, cond_msg] if part])
+                if merged:
+                    reason = merged
+                    break
+
+        container_statuses = status.get('containerStatuses', []) if isinstance(status.get('containerStatuses', []), list) else []
+        for c in container_statuses:
+            if not isinstance(c, dict):
+                continue
+            state = c.get('state', {}) if isinstance(c.get('state', {}), dict) else {}
+            waiting = state.get('waiting', {}) if isinstance(state.get('waiting', {}), dict) else {}
+            terminated = state.get('terminated', {}) if isinstance(state.get('terminated', {}), dict) else {}
+            waiting_reason = str(waiting.get('reason', '') or '').strip()
+            waiting_msg = str(waiting.get('message', '') or '').strip()
+            terminated_reason = str(terminated.get('reason', '') or '').strip()
+            terminated_msg = str(terminated.get('message', '') or '').strip()
+            if waiting_reason:
+                merged = ': '.join([part for part in [waiting_reason, waiting_msg] if part])
+                if 'crashloopbackoff' in waiting_reason.lower():
+                    last_state = c.get('lastState', {}) if isinstance(c.get('lastState', {}), dict) else {}
+                    last_terminated = last_state.get('terminated', {}) if isinstance(last_state.get('terminated', {}), dict) else {}
+                    last_reason = str(last_terminated.get('reason', '') or '').strip()
+                    last_exit = str(last_terminated.get('exitCode', '') or '').strip()
+                    if last_reason or last_exit:
+                        tail = f"lastTermination={last_reason}{f' exitCode={last_exit}' if last_exit else ''}".strip()
+                        merged = f"{merged} | {tail}" if merged else tail
+                return merged or waiting_reason
+            if terminated_reason:
+                merged = ': '.join([part for part in [terminated_reason, terminated_msg] if part])
+                return merged or terminated_reason
+
+        # CrashLoop cases often require previous termination hints.
+        for c in container_statuses:
+            if not isinstance(c, dict):
+                continue
+            last_state = c.get('lastState', {}) if isinstance(c.get('lastState', {}), dict) else {}
+            terminated = last_state.get('terminated', {}) if isinstance(last_state.get('terminated', {}), dict) else {}
+            if not terminated:
+                continue
+            last_reason = str(terminated.get('reason', '') or '').strip()
+            exit_code = str(terminated.get('exitCode', '') or '').strip()
+            finished_at = str(terminated.get('finishedAt', '') or '').strip()
+            if not last_reason and not exit_code:
+                continue
+            suffix = []
+            if exit_code:
+                suffix.append(f"exitCode={exit_code}")
+            if finished_at:
+                suffix.append(f"finishedAt={finished_at}")
+            detail = ', '.join(suffix)
+            return f"{last_reason}{f' ({detail})' if detail else ''}".strip()
+
+        return reason
+
+    def _collect_namespace_workloads(self, namespace: str, timeout_seconds: float = 8.0) -> Dict[str, Dict]:
+        # Use deployments only to avoid noisy RBAC failures for statefulsets
+        # in clusters where statefulsets are not used by monitored services.
+        cmd = ['kubectl', 'get', 'deployments', '-n', namespace, '-o', 'json']
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=max(1.0, float(timeout_seconds or 8.0))
+        )
+        if result.returncode != 0:
+            # Do not fail the full live snapshot if workload metadata is unavailable.
+            return {}
+
+        payload = json.loads(result.stdout or '{}')
+        items = payload.get('items', []) if isinstance(payload.get('items', []), list) else []
+        workload_map: Dict[str, Dict] = {}
+        for item in items:
+            if not isinstance(item, dict):
+                continue
+            metadata = item.get('metadata', {}) if isinstance(item.get('metadata', {}), dict) else {}
+            spec = item.get('spec', {}) if isinstance(item.get('spec', {}), dict) else {}
+            raw_name = str(metadata.get('name', '') or '').strip()
+            if not raw_name:
+                continue
+            name = self._canonical_service(raw_name)
+            try:
+                desired = int(spec.get('replicas', 1) or 0)
+            except Exception:
+                desired = 0
+            kind = str(item.get('kind', '') or '').strip()
+            workload_map[name] = {
+                'name': name,
+                'raw_name': raw_name,
+                'desired_replicas': max(0, desired),
+                'workload_kind': kind,
+            }
+        return workload_map
+
+    def _get_live_es_overview(self, namespace: str, service_names: List[str]) -> Dict[str, Dict]:
+        if self.elasticsearch is None or not isinstance(service_names, list) or not service_names:
+            return {}
+
+        monitor_cfg = self.config.get('monitoring', {}) if isinstance(self.config, dict) else {}
+        refresh_seconds = int(monitor_cfg.get('live_snapshot_es_refresh_seconds', 25) or 25)
+        refresh_seconds = max(10, min(refresh_seconds, 180))
+        window_minutes = int(monitor_cfg.get('incident_log_window_minutes', 5) or 5)
+        window_minutes = max(1, min(window_minutes, 30))
+        max_docs = int(monitor_cfg.get('live_snapshot_es_max_docs', 3000) or 3000)
+        max_docs = max(500, min(max_docs, 10000))
+
+        cache_key = str(namespace or '').strip().lower()
+        now = datetime.now()
+        cached_ts = self._live_es_overview_cache_ts.get(cache_key)
+        cached_data = self._live_es_overview_cache.get(cache_key)
+        if (
+            cached_ts is not None and
+            isinstance(cached_data, dict) and
+            (now - cached_ts).total_seconds() < refresh_seconds
+        ):
+            return cached_data
+
+        try:
+            overview = self.elasticsearch.get_services_overview(
+                minutes=window_minutes,
+                max_docs=max_docs,
+                namespaces=[cache_key],
+                service_names=service_names,
+                ignored_patterns=self.config.get('ignored_log_patterns', [])
+            )
+        except Exception as e:
+            logger.warning(f"Live ES overview fetch failed for {cache_key}: {e}")
+            overview = {}
+
+        if isinstance(overview, dict):
+            self._live_es_overview_cache[cache_key] = overview
+            self._live_es_overview_cache_ts[cache_key] = now
+        return overview if isinstance(overview, dict) else {}
+
+    def _merge_recent_errors_from_live_es(self, namespace: str, service_map: Dict[str, Dict]):
+        if not isinstance(service_map, dict) or not service_map:
+            return
+
+        service_names = []
+        for svc in service_map.values():
+            if not isinstance(svc, dict):
+                continue
+            name = str(svc.get('name', '') or '').strip()
+            if name:
+                service_names.append(name)
+        if not service_names:
+            return
+
+        # Respect use_static_monitored_services to avoid ES query too long
+        monitor_cfg = self.config.get('monitoring', {}) if isinstance(self.config, dict) else {}
+        use_static = bool(monitor_cfg.get('use_static_monitored_services', False))
+        if use_static:
+            monitored = self.config.get('monitored_services', [])
+            if isinstance(monitored, list) and monitored:
+                allowed_names = set()
+                for item in monitored:
+                    if isinstance(item, dict):
+                        m_name = str(item.get('name', '') or '').strip()
+                        m_ns = str(item.get('namespace', '') or '').strip().lower()
+                        if m_name and (not m_ns or m_ns == namespace.lower()):
+                            allowed_names.add(m_name.lower())
+                            allowed_names.add(self._canonical_service(m_name).lower())
+                if allowed_names:
+                    service_names = [n for n in service_names if n.lower() in allowed_names or self._canonical_service(n).lower() in allowed_names]
+                    if not service_names:
+                        return
+
+        overview = self._get_live_es_overview(namespace, service_names)
+        if not isinstance(overview, dict) or not overview:
+            return
+
+        def _norm(raw: str) -> str:
+            return self._canonical_service(str(raw or '').strip()).lower().replace('-', '')
+
+        by_norm = {}
+        for _, row in overview.items():
+            if not isinstance(row, dict):
+                continue
+            row_ns = str(row.get('namespace', '') or '').strip().lower()
+            row_name = str(row.get('name', '') or '').strip()
+            if row_ns != namespace or not row_name:
+                continue
+            by_norm[_norm(row_name)] = row
+
+        for key, svc in service_map.items():
+            if not isinstance(svc, dict):
+                continue
+
+            existing = svc.get('recent_errors', []) if isinstance(svc.get('recent_errors', []), list) else []
+            has_actionable = False
+            for item in existing:
+                if not isinstance(item, dict):
+                    continue
+                msg = str(item.get('message', '') or '').strip()
+                if msg and self._is_actionable_error_message(msg):
+                    has_actionable = True
+                    break
+            if has_actionable:
+                continue
+
+            name = str(svc.get('name', '') or '').strip()
+            hit = by_norm.get(_norm(name), {}) if name else {}
+            if not isinstance(hit, dict) or not hit:
+                continue
+
+            msg = str(hit.get('latest_error_message', '') or '').strip()
+            if not msg:
+                msg = str(hit.get('latest_any_message', '') or '').strip()
+            if not msg or not self._is_actionable_error_message(msg):
+                continue
+
+            parsed = self._derive_exact_from_message(key, msg, crashloop_present=('crashloopbackoff' in msg.lower()))
+            exact_msg = str(parsed.get('issue', '') or '').strip() or msg
+            svc['recent_errors'] = [{
+                'timestamp': str(hit.get('latest_timestamp', datetime.now().isoformat()) or datetime.now().isoformat()),
+                'message': exact_msg,
+                'severity': 'ERROR',
+            }]
+            current_status = str(svc.get('status', '') or '').strip().lower()
+            if current_status in {'healthy', 'pending', 'unknown'}:
+                svc['status'] = 'warning'
+                pod_status = svc.get('pod_status', {}) if isinstance(svc.get('pod_status', {}), dict) else {}
+                pod_status['status'] = 'warning'
+                svc['pod_status'] = pod_status
+            service_map[key] = svc
+
+    def _build_service_map_from_pods(self, namespace: str, pods: List[Dict], workloads: Optional[Dict[str, Dict]] = None) -> Dict[str, Dict]:
+        grouped: Dict[str, Dict] = defaultdict(lambda: {
+            'pods': [],
+            'pod_status_rows': [],
+            'restarts': 0,
+            'running': 0,
+            'ready': 0,
+            'issues': 0,
+            'recent_errors': [],
+            'desired_replicas': None,
+            'workload_kind': '',
+            'workload_name': '',
+        })
+
+        if isinstance(workloads, dict):
+            for name, spec in workloads.items():
+                if not isinstance(spec, dict):
+                    continue
+                key = str(name or '').strip()
+                if not key:
+                    continue
+                bucket = grouped[key]
+                bucket['desired_replicas'] = int(spec.get('desired_replicas', 0) or 0)
+                bucket['workload_kind'] = str(spec.get('workload_kind', '') or '')
+                bucket['workload_name'] = str(spec.get('raw_name', key) or key)
+
+        for pod in pods:
+            if not isinstance(pod, dict):
+                continue
+            service_name = self._canonical_service(str(self._service_name_from_pod(pod) or '').strip())
+            if not service_name:
+                continue
+
+            metadata = pod.get('metadata', {}) if isinstance(pod.get('metadata', {}), dict) else {}
+            status = pod.get('status', {}) if isinstance(pod.get('status', {}), dict) else {}
+            pod_name = str(metadata.get('name', '') or '').strip()
+            phase = str(status.get('phase', 'Unknown') or 'Unknown').strip()
+            ready = bool(self._pod_ready(pod))
+            issue_reason = str(self._pod_issue_reason(pod) or '').strip()
+
+            restarts = 0
+            container_statuses = status.get('containerStatuses', []) if isinstance(status.get('containerStatuses', []), list) else []
+            for c in container_statuses:
+                if not isinstance(c, dict):
+                    continue
+                try:
+                    restarts += int(c.get('restartCount', 0) or 0)
+                except Exception:
+                    continue
+
+            bucket = grouped[service_name]
+            if pod_name:
+                bucket['pods'].append(pod_name)
+            bucket['pod_status_rows'].append({
+                'name': pod_name,
+                'status': phase,
+                'ready': ready,
+                'restarts': restarts,
+                'reason': issue_reason,
+            })
+            bucket['restarts'] += restarts
+            bucket['running'] += 1 if phase.lower() == 'running' else 0
+            bucket['ready'] += 1 if ready else 0
+            bucket['issues'] += 0 if ready else 1
+            if issue_reason:
+                bucket['recent_errors'].append({'message': issue_reason, 'pod': pod_name})
+
+        service_map: Dict[str, Dict] = {}
+        for service_name, bucket in grouped.items():
+            total = len(bucket['pods'])
+            ready = int(bucket['ready'])
+            desired_replicas = bucket.get('desired_replicas', None)
+            if desired_replicas is not None and int(desired_replicas or 0) <= 0:
+                status = 'pending'
+            elif total == 0:
+                status = 'pending'
+            elif ready == total:
+                status = 'healthy'
+            elif ready == 0:
+                status = 'down'
+            else:
+                status = 'degraded'
+
+            if status == 'healthy' and int(bucket['restarts']) > 0:
+                status = 'warning'
+
+            key = f"{namespace}/{service_name}"
+            recent_errors = []
+            for err in list(bucket['recent_errors']):
+                if not isinstance(err, dict):
+                    continue
+                err_msg = str(err.get('message', '') or '').strip()
+                err_pod = str(err.get('pod', '') or '').strip()
+                if not err_msg:
+                    continue
+                exact_msg = f"Exact Issue: {key} pod {err_pod or 'unknown'} | {err_msg}"
+                recent_errors.append({'message': exact_msg, 'pod': err_pod, 'severity': 'ERROR'})
+
+            if not recent_errors:
+                if total == 0:
+                    if desired_replicas is not None and int(desired_replicas or 0) == 0:
+                        recent_errors.append({
+                            'message': f"Exact Issue: {key} has desired replicas=0 (not scheduled)",
+                            'severity': 'WARNING'
+                        })
+                    elif desired_replicas is not None and int(desired_replicas or 0) > 0:
+                        recent_errors.append({
+                            'message': f"Exact Issue: {key} has desired replicas={int(desired_replicas)} but no pods are scheduled/running",
+                            'severity': 'ERROR'
+                        })
+                elif status in {'degraded', 'down', 'warning'}:
+                    for pod_row in bucket.get('pod_status_rows', []):
+                        if not isinstance(pod_row, dict):
+                            continue
+                        if bool(pod_row.get('ready', False)):
+                            continue
+                        pod_name = str(pod_row.get('name', '') or 'unknown')
+                        pod_reason = str(pod_row.get('reason', '') or '').strip()
+                        pod_phase = str(pod_row.get('status', '') or '').strip()
+                        detail = pod_reason or (f"pod phase={pod_phase}" if pod_phase else 'pod not ready')
+                        recent_errors.append({
+                            'message': f"Exact Issue: {key} pod {pod_name} | {detail}",
+                            'severity': 'ERROR'
+                        })
+                        break
+
+            service_map[key] = {
+                'name': service_name,
+                'namespace': namespace,
+                'pods': list(bucket['pods']),
+                'status': status,
+                'restarts': int(bucket['restarts']),
+                'recent_errors': recent_errors,
+                'pod_status': {
+                    'status': status,
+                    'pods': list(bucket['pod_status_rows']),
+                    'namespace': namespace,
+                },
+                'metrics': {
+                    'desired_replicas': int(desired_replicas or 0) if desired_replicas is not None else None,
+                    'workload_kind': str(bucket.get('workload_kind', '') or ''),
+                    'workload_name': str(bucket.get('workload_name', service_name) or service_name),
+                    'pod_total_count': total,
+                    'pod_running_count': int(bucket['running']),
+                    'pod_ready_count': ready,
+                    'pod_issue_count': int(bucket['issues']),
+                    'restart_count': int(bucket['restarts']),
+                }
+            }
+        return service_map
+
+    @staticmethod
+    def _summary_from_service_map(service_map: Dict[str, Dict]) -> Dict[str, int]:
+        summary = {
+            'all_services': 0,
+            'healthy': 0,
+            'degraded': 0,
+            'down': 0,
+            'down_degraded': 0,
+            'unresolved_alerts': 0,
+        }
+        if not isinstance(service_map, dict):
+            return summary
+
+        summary['all_services'] = len(service_map)
+        for svc in service_map.values():
+            if not isinstance(svc, dict):
+                continue
+            st = str(svc.get('status', 'down') or 'down').strip().lower()
+            if st == 'healthy':
+                summary['healthy'] += 1
+            elif st == 'degraded':
+                summary['degraded'] += 1
+            else:
+                summary['down'] += 1
+
+        summary['down_degraded'] = int(summary['down']) + int(summary['degraded'])
+        summary['unresolved_alerts'] = int(summary['down_degraded'])
+        return summary
+
+    def _collect_namespace_live_snapshot(self, namespace: str, timeout_seconds: float = 8.0) -> Dict[str, Dict]:
+        ns = str(namespace or '').strip().lower()
+        if ns not in {'venus', 'jupiter'}:
+            raise RuntimeError(f"unsupported namespace: {namespace}")
+
+        started = time.time()
+        cmd = ['kubectl', 'get', 'pods', '-n', ns, '-o', 'json']
+        result = subprocess.run(
+            cmd,
+            capture_output=True,
+            text=True,
+            timeout=max(1.0, float(timeout_seconds or 8.0))
+        )
+        if result.returncode != 0:
+            err = (result.stderr or '').strip() or 'kubectl get pods failed'
+            raise RuntimeError(err)
+
+        payload = json.loads(result.stdout or '{}')
+        pods = payload.get('items', []) if isinstance(payload.get('items', []), list) else []
+        workloads = {}
+        try:
+            workloads = self._collect_namespace_workloads(ns, timeout_seconds=max(2.0, float(timeout_seconds or 8.0) - 1.0))
+        except Exception as e:
+            logger.warning(f"Live workload collection failed for {ns}: {e}")
+        services = self._build_service_map_from_pods(ns, pods, workloads=workloads)
+        self._merge_recent_errors_from_last_status(ns, services)
+        self._merge_recent_errors_from_live_es(ns, services)
+        elapsed_ms = int((time.time() - started) * 1000)
+        return {
+            'services': services,
+            'namespace': ns,
+            'collected_at': time.time(),
+            'collection_source': 'k8s_live_api',
+            'total_services': len(services),
+            'summary': self._summary_from_service_map(services),
+            'collection_time_ms': elapsed_ms,
+        }
+
+    def _merge_recent_errors_from_last_status(self, namespace: str, service_map: Dict[str, Dict]):
+        """Enrich live pod snapshot with ES-derived actionable root-cause text.
+
+        This uses the already-computed `_last_service_status` (built by monitor loop,
+        typically from Elasticsearch) and does not run additional kubectl log calls.
+        """
+        if not isinstance(service_map, dict) or not service_map:
+            return
+        last_status = self._last_service_status if isinstance(self._last_service_status, dict) else {}
+        if not isinstance(last_status, dict) or not last_status:
+            return
+
+        def _norm_name(raw: str) -> str:
+            value = self._canonical_service(str(raw or '').strip())
+            return value.lower().replace('-', '')
+
+        def _lookup_prev(ns: str, name: str) -> Dict:
+            direct_key = f"{ns}/{name}"
+            prev = last_status.get(direct_key)
+            if isinstance(prev, dict):
+                return prev
+            canonical_name = self._canonical_service(name)
+            canonical_key = f"{ns}/{canonical_name}"
+            prev = last_status.get(canonical_key)
+            if isinstance(prev, dict):
+                return prev
+
+            target = _norm_name(name)
+            for raw_key, row in last_status.items():
+                if not isinstance(row, dict):
+                    continue
+                row_ns = str(row.get('namespace', '') or '').strip().lower()
+                row_name = str(row.get('name', '') or '').strip()
+                if row_ns != ns:
+                    continue
+                if row_name and _norm_name(row_name) == target:
+                    return row
+                if isinstance(raw_key, str) and '/' in raw_key:
+                    _, key_name = raw_key.split('/', 1)
+                    if _norm_name(key_name) == target:
+                        return row
+            return {}
+
+        for key, svc in service_map.items():
+            if not isinstance(svc, dict):
+                continue
+            existing = svc.get('recent_errors', []) if isinstance(svc.get('recent_errors', []), list) else []
+            has_actionable_existing = False
+            for existing_item in existing:
+                if not isinstance(existing_item, dict):
+                    continue
+                existing_msg = str(existing_item.get('message', '') or '').strip()
+                if existing_msg and self._is_actionable_error_message(existing_msg):
+                    has_actionable_existing = True
+                    break
+            if has_actionable_existing:
+                continue
+
+            ns = str(svc.get('namespace', '') or '').strip().lower()
+            name = str(svc.get('name', '') or '').strip()
+            if ns != namespace or not name:
+                continue
+
+            lookup_key = f"{ns}/{name}"
+            prev = _lookup_prev(ns, name)
+            prev_errors = prev.get('recent_errors', []) if isinstance(prev.get('recent_errors', []), list) else []
+            if not prev_errors:
+                continue
+
+            actionable = []
+            for item in prev_errors:
+                if not isinstance(item, dict):
+                    continue
+                msg = str(item.get('message', '') or '').strip()
+                if not msg or not self._is_actionable_error_message(msg):
+                    continue
+                parsed = self._derive_exact_from_message(lookup_key, msg, crashloop_present=('crashloopbackoff' in msg.lower()))
+                exact_msg = str(parsed.get('issue', '') or '').strip() or msg
+                actionable.append({
+                    'timestamp': str(item.get('timestamp', datetime.now().isoformat()) or datetime.now().isoformat()),
+                    'message': exact_msg,
+                    'severity': str(item.get('severity', 'ERROR') or 'ERROR').upper(),
+                })
+
+            if not actionable:
+                continue
+
+            svc['recent_errors'] = actionable[:1]
+            # Keep dashboard visibility: healthy + actionable error => warning.
+            current_status = str(svc.get('status', '') or '').strip().lower()
+            if current_status in {'healthy', 'pending', 'unknown'}:
+                svc['status'] = 'warning'
+                pod_status = svc.get('pod_status', {}) if isinstance(svc.get('pod_status', {}), dict) else {}
+                pod_status['status'] = 'warning'
+                svc['pod_status'] = pod_status
+            service_map[key] = svc
+
+    @staticmethod
+    def _build_combined_snapshot(namespace_snapshots: Dict[str, Dict]) -> Dict[str, Dict]:
+        combined_services: Dict[str, Dict] = {}
+        combined_summary = {
+            'all_services': 0,
+            'healthy': 0,
+            'degraded': 0,
+            'down': 0,
+            'down_degraded': 0,
+            'unresolved_alerts': 0,
+        }
+        collection_time_ms = 0
+        collected_at = time.time()
+
+        for ns in ('venus', 'jupiter'):
+            snap = namespace_snapshots.get(ns, {})
+            if not isinstance(snap, dict):
+                continue
+            services = snap.get('services', {}) if isinstance(snap.get('services', {}), dict) else {}
+            combined_services.update(services)
+            summary = snap.get('summary', {}) if isinstance(snap.get('summary', {}), dict) else {}
+            for k in combined_summary.keys():
+                combined_summary[k] += int(summary.get(k, 0) or 0)
+            try:
+                collection_time_ms = max(collection_time_ms, int(snap.get('collection_time_ms', 0) or 0))
+            except Exception:
+                pass
+            try:
+                collected_at = max(collected_at, float(snap.get('collected_at', 0) or 0))
+            except Exception:
+                pass
+
+        return {
+            'services': combined_services,
+            'namespace': 'all',
+            'collected_at': collected_at,
+            'collection_source': 'k8s_live_api',
+            'total_services': len(combined_services),
+            'summary': combined_summary,
+            'collection_time_ms': collection_time_ms,
+        }
+
+    def _run_live_snapshot_collector(self):
+        interval_seconds = 10.0
+        namespaces = ('venus', 'jupiter')
+        while self.agent_status.get('running', False):
+            cycle_started = time.time()
+            snapshots: Dict[str, Dict] = {}
+
+            try:
+                with ThreadPoolExecutor(max_workers=2) as pool:
+                    future_map = {
+                        pool.submit(self._collect_namespace_live_snapshot, ns, 8.0): ns
+                        for ns in namespaces
+                    }
+                    for future in as_completed(future_map):
+                        ns = future_map[future]
+                        try:
+                            snapshots[ns] = future.result(timeout=8.2)
+                        except Exception as e:
+                            logger.warning(f"Live snapshot collection failed for {ns}: {e}")
+
+                # Write namespace snapshots independently to avoid dashboard reset
+                # when one namespace collection is slow/fails.
+                for ns in namespaces:
+                    snap = snapshots.get(ns)
+                    if isinstance(snap, dict):
+                        self._write_namespace_snapshot(ns, snap)
+
+                if snapshots:
+                    combined = self._build_combined_snapshot(snapshots)
+                    self._write_namespace_snapshot('all', combined)
+                    if not all(ns in snapshots for ns in namespaces):
+                        logger.warning("Live snapshot cycle incomplete; wrote partial namespace snapshots")
+                else:
+                    logger.warning("Live snapshot cycle failed for all namespaces; keeping previous Redis snapshot")
+            except Exception as e:
+                logger.warning(f"Live snapshot collector cycle failed: {e}")
+
+            elapsed = time.time() - cycle_started
+            sleep_for = interval_seconds - elapsed
+            if sleep_for > 0:
+                time.sleep(sleep_for)
+
+    def _start_live_snapshot_collector_if_needed(self):
+        with self._snapshot_collector_lock:
+            if self._snapshot_collector_started:
+                return
+            self._snapshot_collector_started = True
+            worker = Thread(target=self._run_live_snapshot_collector, daemon=True, name='live-snapshot-collector')
+            worker.start()
+
+    def _build_namespace_snapshot_map(self, namespace: str, minutes: int = 5) -> Dict:
+        ns = str(namespace or '').strip().lower()
+        if ns not in {'venus', 'jupiter'}:
+            return {}
+        try:
+            snapshot = self._collect_namespace_live_snapshot(ns, timeout_seconds=8.0)
+            services = snapshot.get('services', {}) if isinstance(snapshot.get('services', {}), dict) else {}
+            return services
+        except Exception:
+            return {}
 
     def _canonical_service(self, service_name: str) -> str:
         """Normalize service name via alias map."""
@@ -856,6 +1732,8 @@ class AIMonitoringAgent:
             # Pod signal is authoritative for final liveliness.
             if pod_state == 'healthy':
                 svc_status = 'healthy'
+            elif pod_state == 'scaled_down':
+                svc_status = 'scaled_down'
             elif pod_state == 'no_pods':
                 svc_status = 'pending'
 
@@ -921,31 +1799,96 @@ class AIMonitoringAgent:
 
     def _selected_services(self):
         """Return configured services or auto-select bounded services per namespace."""
+        monitor_cfg = self.config.get('monitoring', {}) if isinstance(self.config, dict) else {}
+        use_static_monitored_services = bool(monitor_cfg.get('use_static_monitored_services', False))
+        allowed_namespaces = list(monitor_cfg.get('discovery_namespaces', ['jupiter', 'venus']))
+        allowed_namespaces = [str(ns).strip() for ns in allowed_namespaces if str(ns).strip()]
+        if not allowed_namespaces:
+            allowed_namespaces = ['jupiter', 'venus']
+
+        cluster_entries = []
+        if self.service_monitor is not None:
+            try:
+                cluster_entries = self.service_monitor.discover_services(namespaces=allowed_namespaces)
+            except Exception:
+                cluster_entries = []
+
+        def _selection_key(name: str) -> str:
+            token = self._canonical_service(str(name or '').strip())
+            token = str(token or '').lower().replace('_', '-').replace('.', '-')
+            if token.endswith('-service'):
+                token = token[:-8]
+            if token.endswith('-svc'):
+                token = token[:-4]
+            parts = [part for part in token.split('-') if part]
+            parts = ['es' if part == 'elasticsearch' else part for part in parts]
+            return '-'.join(parts)
+
+        cluster_by_norm = {}
+        for item in cluster_entries:
+            namespace = str(item.get('namespace', '') or '').strip()
+            name = self._canonical_service(str(item.get('name', '') or '').strip())
+            if not namespace or namespace not in allowed_namespaces or not name:
+                continue
+            norm = _selection_key(name)
+            if not norm:
+                continue
+            cluster_by_norm.setdefault(norm, [])
+            if not any((row.get('namespace') == namespace and row.get('name') == name) for row in cluster_by_norm[norm]):
+                cluster_by_norm[norm].append({'namespace': namespace, 'name': name})
+
         monitored = self.config.get('monitored_services', [])
-        if isinstance(monitored, list) and monitored:
+        if use_static_monitored_services and isinstance(monitored, list) and monitored:
             cleaned = []
             seen = set()
             for item in monitored:
                 if not isinstance(item, dict):
                     continue
                 name = item.get('name')
-                namespace = item.get('namespace', 'unknown')
+                namespace = str(item.get('namespace', '') or '').strip()
                 if name:
                     canonical_name = self._canonical_service(str(name).strip())
                     if not canonical_name:
                         continue
-                    dedupe_key = (str(namespace), canonical_name)
+                    resolved_name = canonical_name
+                    resolved_namespace = namespace
+                    candidates = cluster_by_norm.get(_selection_key(canonical_name), [])
+                    if not candidates:
+                        # When cluster discovery is temporarily unavailable, keep
+                        # explicitly configured selections so dashboard does not blank.
+                        if resolved_namespace in allowed_namespaces:
+                            dedupe_key = (str(resolved_namespace), resolved_name)
+                            if dedupe_key not in seen:
+                                seen.add(dedupe_key)
+                                cleaned.append({'name': resolved_name, 'namespace': resolved_namespace})
+                        continue
+
+                    if not resolved_namespace or resolved_namespace.lower() in {'unknown', 'all', '*'}:
+                        resolved_namespace = candidates[0]['namespace']
+                        resolved_name = candidates[0]['name']
+                    else:
+                        ns_match = next((row for row in candidates if row.get('namespace') == resolved_namespace), None)
+                        if ns_match is None:
+                            # Namespace-specific entry not deployed in that namespace.
+                            continue
+                        resolved_name = ns_match.get('name', resolved_name)
+
+                    namespace = resolved_namespace
+                    if namespace not in allowed_namespaces:
+                        continue
+                    dedupe_key = (str(namespace), resolved_name)
                     if dedupe_key in seen:
                         continue
                     seen.add(dedupe_key)
-                    cleaned.append({'name': canonical_name, 'namespace': namespace})
+                    cleaned.append({'name': resolved_name, 'namespace': namespace})
             if cleaned:
                 self._selected_services_cache = cleaned
                 self._selected_services_cache_ts = datetime.now()
                 return cleaned
 
-        per_namespace_cap = int(self.config.get('monitoring', {}).get('auto_select_per_namespace', 5) or 5)
-        overall_cap = int(self.config.get('monitoring', {}).get('auto_select_total_limit', 15) or 15)
+        per_namespace_cap = int(self.config.get('monitoring', {}).get('auto_select_per_namespace', 20) or 20)
+        overall_cap = int(self.config.get('monitoring', {}).get('auto_select_total_limit', 40) or 40)
+        selection_source = str(monitor_cfg.get('service_selection_source', 'cluster') or 'cluster').strip().lower()
 
         cache_ttl_seconds = int(self.config.get('monitoring', {}).get('auto_select_cache_seconds', 120) or 120)
         if (
@@ -957,14 +1900,42 @@ class AIMonitoringAgent:
 
         configured_discovery_limit = int(self.config.get('all_services_discovery_limit', overall_cap) or overall_cap)
         all_limit = min(configured_discovery_limit, overall_cap)
-        if self.elasticsearch is not None:
-            allowed = list(self.config.get('monitoring', {}).get('discovery_namespaces', ['earth', 'mercury', 'mars']))
+        allowed = allowed_namespaces
+        if selection_source in {'cluster', 'kubernetes', 'kubectl', 'kubelet', 'auto'} and cluster_entries:
+            discovered = cluster_entries
+            bounded = []
+            per_ns_counts = {ns: 0 for ns in allowed}
+            seen = set()
+
+            for item in discovered:
+                if len(bounded) >= overall_cap:
+                    break
+                namespace = str(item.get('namespace', '') or '').strip()
+                name = self._canonical_service(str(item.get('name', '') or '').strip())
+                if not namespace or namespace not in per_ns_counts:
+                    continue
+                if not name:
+                    continue
+                dedupe_key = (namespace, name)
+                if dedupe_key in seen:
+                    continue
+                if per_ns_counts.get(namespace, 0) >= per_namespace_cap:
+                    continue
+
+                seen.add(dedupe_key)
+                per_ns_counts[namespace] = per_ns_counts.get(namespace, 0) + 1
+                bounded.append({'name': name, 'namespace': namespace})
+
+            if bounded:
+                self._selected_services_cache = bounded
+                self._selected_services_cache_ts = datetime.now()
+                return bounded
+
+        if selection_source in {'elasticsearch', 'hybrid'} and self.elasticsearch is not None:
             fast_names = self.elasticsearch.discover_service_names_fast(limit=all_limit * 3)
             if fast_names:
                 bounded = []
-                namespace_cycle = allowed if allowed else ['unknown']
-                ns_len = len(namespace_cycle)
-                per_ns_counts = {ns: 0 for ns in namespace_cycle}
+                per_ns_counts = {ns: 0 for ns in allowed}
                 seen = set()
 
                 for svc_name in fast_names:
@@ -975,39 +1946,59 @@ class AIMonitoringAgent:
                     if not canonical_name:
                         continue
 
-                    chosen_ns = None
-                    for idx in range(ns_len):
-                        ns = namespace_cycle[idx]
-                        dedupe_key = (ns, canonical_name)
+                    matches = cluster_by_norm.get(_selection_key(canonical_name), [])
+                    if not matches:
+                        continue
+
+                    for match in matches:
+                        if len(bounded) >= overall_cap:
+                            break
+                        ns = str(match.get('namespace', '') or '').strip()
+                        resolved_name = self._canonical_service(str(match.get('name', '') or '').strip())
+                        if not ns or ns not in per_ns_counts:
+                            continue
+                        if not resolved_name:
+                            continue
+                        dedupe_key = (ns, resolved_name)
                         if dedupe_key in seen:
                             continue
-                        if per_ns_counts.get(ns, 0) < per_namespace_cap:
-                            chosen_ns = ns
-                            break
+                        if per_ns_counts.get(ns, 0) >= per_namespace_cap:
+                            continue
 
-                    if chosen_ns is None:
-                        break
-
-                    per_ns_counts[chosen_ns] = per_ns_counts.get(chosen_ns, 0) + 1
-                    seen.add((chosen_ns, canonical_name))
-                    bounded.append({'name': canonical_name, 'namespace': chosen_ns})
+                        per_ns_counts[ns] = per_ns_counts.get(ns, 0) + 1
+                        seen.add(dedupe_key)
+                        bounded.append({'name': resolved_name, 'namespace': ns})
 
                 if bounded:
                     self._selected_services_cache = bounded
                     self._selected_services_cache_ts = datetime.now()
                     return bounded
-        fallback = [
-            {
-                'name': self._canonical_service(str(svc.get('name', '')).strip()),
-                'namespace': svc.get('namespace', 'unknown')
-            }
-            for svc in self.config.get('services', []) if svc.get('name')
-        ]
-        fallback = [svc for svc in fallback if svc.get('name')]
-        if fallback:
-            self._selected_services_cache = fallback[:overall_cap]
-            self._selected_services_cache_ts = datetime.now()
+
+        # Final guard: do not abruptly drop selected services to empty on transient
+        # discovery failures (kubectl/API hiccups). Reuse last known-good snapshot.
+        stale_fallback_seconds = int(monitor_cfg.get('auto_select_stale_fallback_seconds', 900) or 900)
+        stale_fallback_seconds = max(cache_ttl_seconds, min(stale_fallback_seconds, 7200))
+        if (
+            self._selected_services_cache_ts is not None and
+            self._selected_services_cache and
+            (datetime.now() - self._selected_services_cache_ts).total_seconds() < stale_fallback_seconds
+        ):
             return self._selected_services_cache
+
+        # Last safety fallback: keep configured monitored services even when
+        # discovery paths fail on cold start.
+        configured = []
+        for item in monitored if isinstance(monitored, list) else []:
+            if not isinstance(item, dict):
+                continue
+            svc_name = self._canonical_service(str(item.get('name', '') or '').strip())
+            svc_ns = str(item.get('namespace', '') or '').strip()
+            if not svc_name or svc_ns not in allowed_namespaces:
+                continue
+            configured.append({'name': svc_name, 'namespace': svc_ns})
+        if configured:
+            return configured[:overall_cap]
+
         return []
 
     def _get_pod_health_signals(self, selected_services: List[Dict]) -> Dict[str, Dict]:
@@ -1020,17 +2011,45 @@ class AIMonitoringAgent:
         if not self.service_monitor or not selected_services:
             return signals
 
+        unique_targets = []
+        seen = set()
         for svc in selected_services:
             name = svc.get('name') if isinstance(svc, dict) else None
             namespace = svc.get('namespace', 'unknown') if isinstance(svc, dict) else 'unknown'
             if not name:
                 continue
-            key = f"{namespace}/{name}"
+            key = (str(namespace), str(name))
+            if key in seen:
+                continue
+            seen.add(key)
+            unique_targets.append({'namespace': str(namespace), 'name': str(name)})
+
+        if not unique_targets:
+            return signals
+
+        workers = int(self.config.get('monitoring', {}).get('pod_health_workers', 12) or 12)
+        workers = max(2, min(workers, 32))
+
+        def _fetch(ns: str, svc_name: str):
             try:
-                pod_status = self.service_monitor.get_pod_status(name, namespace=namespace)
-                signals[key] = pod_status if isinstance(pod_status, dict) else {'status': 'unknown', 'pods': []}
+                status = self.service_monitor.get_pod_status(svc_name, namespace=ns)
+                if isinstance(status, dict):
+                    return status
             except Exception:
-                signals[key] = {'status': 'unknown', 'pods': []}
+                pass
+            return {'status': 'unknown', 'pods': []}
+
+        with ThreadPoolExecutor(max_workers=min(workers, len(unique_targets))) as pool:
+            futures = {
+                pool.submit(_fetch, t['namespace'], t['name']): f"{t['namespace']}/{t['name']}"
+                for t in unique_targets
+            }
+            for future in as_completed(futures):
+                key = futures[future]
+                try:
+                    signals[key] = future.result()
+                except Exception:
+                    signals[key] = {'status': 'unknown', 'pods': []}
         return signals
 
     def _extract_dependency_from_message(self, message: str) -> str:
@@ -1114,15 +2133,22 @@ class AIMonitoringAgent:
         if not text:
             return False
 
+        # Hard-ignore noisy internal OTel collector target FIRST — before the
+        # exception-name guard below. UnknownHostException for the signoz
+        # collector endpoint is infra telemetry noise, not an app error.
+        lower_text = text.lower()
+        if 'fabhotels-signoz-prod-otel-collector.signoz-prod11.svc.cluster.local' in lower_text:
+            return True
+        if 'signoz-prod11.svc.cluster.local' in lower_text:
+            return True
+
+        # Never suppress concrete exception/error signatures from app logs.
+        if re.search(r'\b([a-zA-Z0-9_.$]+(?:Exception|Error))\b', text, re.IGNORECASE):
+            return False
+
         builtin_noise_patterns = [
-            r'(?i)no\s+record\s+found\s+for\s+selection\s+of\s+trigger',
-            r'(?i)qrtz_(cron|simple|blob|simprop)_triggers',
-            r'(?i)sendposbooking(checkin|checkout)taskjob',
-            r'(?i)default\.sendposbooking(checkin|checkout)taskjob',
-            r'(?i)localdatasourcejobstore.*couldn\'t\s+retrieve\s+trigger',
-            r'(?i)illegalstateexception.*no\s+record\s+found\s+for\s+selection\s+of\s+trigger',
-            r'(?i)springbootquartzapp.*misfirehandler',
-            r'(?i)org\.quartz\.jobpersistenceexception',
+            r'(?i)fabhotels-signoz-prod-otel-collector\.signoz-prod11\.svc\.cluster\.local',
+            r'(?i)signoz-prod11\.svc\.cluster\.local',
         ]
         for pattern in builtin_noise_patterns:
             if re.search(pattern, text):
@@ -1168,12 +2194,6 @@ class AIMonitoringAgent:
         if not message:
             return False
 
-        if self._matches_ignored_log_pattern(message):
-            return False
-
-        if self._is_internal_otel_exporter_noise(message):
-            return False
-
         exception_regex_default = r'\b([a-zA-Z0-9_.$]+(?:Exception|Error))\b'
         exception_regex = str(
             self.config.get('monitoring', {}).get('exception_signature_regex', exception_regex_default)
@@ -1191,6 +2211,12 @@ class AIMonitoringAgent:
         # Fallback for plain-text exception/error tokens in any case style.
         if re.search(r'\b(exception|error)\b', str(message), re.IGNORECASE):
             return True
+
+        if self._matches_ignored_log_pattern(message):
+            return False
+
+        if self._is_internal_otel_exporter_noise(message):
+            return False
 
         return bool(re.search(
             r'(?i)\b(connection\s+refused|timeout|timed\s*out|deadline\s+exceeded|http\s*5\d\d|status\s*5\d\d|imagepullbackoff|errimagepull|crashloopbackoff|oomkilled|out\s*of\s*memory|unreachable|refused\s+stream|reset\s+by\s+peer|failed\s+to\s+connect|could\s+not\s+resolve\s+placeholder|failed\s+to\s+bind\s+properties|configurationpropertiesbindexception|bindexception|unsatisfieddependencyexception|beancreationexception|context\s+initialization\s*-\s*cancelling\s+refresh\s+attempt|unable\s+to\s+start\s+reactive\s+web\s+server|invaliddataaccessapiusageexception|illegalargumentexception|unknown\s+name\s+value\s*\[[^\]]+\]\s*for\s*enum|(?:invalid|unknown|unsupported|unexpected|illegal)[^\n]{0,120}?value\s+[\'\"][^\'\"]+[\'\"][^\n]{0,120}?for\s+[a-zA-Z_][\w$]*(?:\.[A-Za-z_][\w$]*)+|[a-zA-Z0-9_.$]+(?:Exception|Error))\b',
@@ -1393,14 +2419,20 @@ class AIMonitoringAgent:
 
         return ''
 
-    def get_service_status(self, minutes: int = 5, services_subset: Optional[List[Dict]] = None):
+    def get_service_status(
+        self,
+        minutes: int = 5,
+        services_subset: Optional[List[Dict]] = None,
+        include_deep_inspection: bool = True
+    ):
         """Get service status using Elasticsearch logs as primary source."""
         if self.elasticsearch is None:
-            return {}
+            fallback_snapshot = self.service_registry.get_services_map()
+            return fallback_snapshot if fallback_snapshot else {}
 
         selected = services_subset if services_subset is not None else self._selected_services()
-        if not selected:
-            return {}
+        if not isinstance(selected, list):
+            selected = []
 
         selected_pairs = set()
         selected_namespaces = set()
@@ -1414,7 +2446,7 @@ class AIMonitoringAgent:
             selected_pairs.add((namespace, svc_name))
             selected_namespaces.add(namespace)
 
-        allowed_namespaces = sorted(ns for ns in selected_namespaces if ns) or self.config.get('monitoring', {}).get('discovery_namespaces', ['earth', 'mercury', 'mars'])
+        allowed_namespaces = sorted(ns for ns in selected_namespaces if ns) or self.config.get('monitoring', {}).get('discovery_namespaces', ['jupiter', 'venus'])
 
         prom_service_health_limit = int(self.config.get('prometheus_service_health_limit', 120) or 120)
         prom_services = selected[:prom_service_health_limit]
@@ -1426,13 +2458,17 @@ class AIMonitoringAgent:
 
         # Aggregated ES query path
         selected_service_names = [str(svc.get('name')) for svc in selected if svc.get('name')]
-        overview = self.elasticsearch.get_services_overview(
-            minutes=minutes,
-            max_docs=5000,
-            namespaces=allowed_namespaces,
-            service_names=selected_service_names,
-            ignored_patterns=self.config.get('ignored_log_patterns', [])
-        )
+        try:
+            overview = self.elasticsearch.get_services_overview(
+                minutes=minutes,
+                max_docs=5000,
+                namespaces=allowed_namespaces,
+                service_names=selected_service_names,
+                ignored_patterns=self.config.get('ignored_log_patterns', [])
+            )
+        except Exception as exc:
+            logger.warning(f"Elasticsearch overview query failed, continuing with pod/prometheus fallback: {exc}")
+            overview = {}
         # Normalize aliases (e.g. sales -> sales-service) and merge duplicate ES buckets.
         normalized_overview: Dict[str, Dict] = {}
         for _, agg in overview.items():
@@ -1479,6 +2515,9 @@ class AIMonitoringAgent:
                     existing['latest_any_message'] = agg.get('latest_any_message', '')
 
         service_status = {}
+        deep_inspection_limit = int(self.config.get('monitoring', {}).get('deep_inspection_service_limit', 40) or 40)
+        deep_inspection_limit = max(0, min(deep_inspection_limit, 200))
+        deep_inspection_count = 0
         for key, agg in normalized_overview.items():
             total_logs = agg.get('total_log_entries', 0)
             error_count = agg.get('error_count', 0)
@@ -1540,6 +2579,8 @@ class AIMonitoringAgent:
             # Kubernetes pod signal overrides for startup/runtime failures (more authoritative)
             if pod_signal.get('status') == 'unhealthy':
                 status = 'degraded'
+            if pod_signal.get('status') == 'scaled_down':
+                status = 'scaled_down'
             if pod_signal.get('status') == 'no_pods':
                 status = 'pending'
             if pod_signal.get('status') == 'healthy' and status == 'pending':
@@ -1611,7 +2652,7 @@ class AIMonitoringAgent:
                 self._is_actionable_error_message(agg.get('latest_error_message', ''))
             )
 
-            if self.service_monitor and should_inspect:
+            if include_deep_inspection and self.service_monitor and should_inspect and deep_inspection_count < deep_inspection_limit:
                 try:
                     deep_inspection = self.service_monitor.deep_inspect_service(
                         service_name,
@@ -1620,6 +2661,8 @@ class AIMonitoringAgent:
                     )
                 except Exception:
                     deep_inspection = {}
+                finally:
+                    deep_inspection_count += 1
 
                 deep_summary = str(deep_inspection.get('summary', '') or '')
                 if 'No pods found for service; deep inspection skipped.' in deep_summary and status == 'healthy':
@@ -1715,6 +2758,16 @@ class AIMonitoringAgent:
                     'prometheus_pod_count': pod_count,
                     'prometheus_restarts_10m': restarts_10m,
                     'prometheus_waiting_pods': waiting_pods,
+                    'pod_total_count': int(pod_signal.get('total_pods', 0) or 0),
+                    'pod_ready_count': int(pod_signal.get('ready_pods', 0) or 0),
+                    'pod_running_count': int(pod_signal.get('running_pods', 0) or 0),
+                    'pod_issue_count': int(pod_signal.get('issue_pods', 0) or 0),
+                    'desired_replicas': (
+                        int(pod_signal.get('desired_replicas'))
+                        if pod_signal.get('desired_replicas') is not None else None
+                    ),
+                    'workload_kind': str(pod_signal.get('workload_kind', '') or ''),
+                    'workload_name': str(pod_signal.get('workload_name', '') or ''),
                     'dependency_failures': 0,
                     'failed_dependencies': [],
                     'observed_dependencies': observed_dependencies,
@@ -1756,12 +2809,17 @@ class AIMonitoringAgent:
             pod_count = int(health.get('pod_count', 0) or 0)
             restarts_10m = float(health.get('restarts_10m', 0.0) or 0.0)
             waiting_pods = float(health.get('waiting_pods', 0.0) or 0.0)
+            pod_total = int(pod_signal.get('total_pods', 0) or 0)
 
             status = 'unknown'
-            if pod_signal.get('status') == 'no_pods' or pod_count <= 0:
+            if pod_signal.get('status') == 'scaled_down':
+                status = 'scaled_down'
+            elif pod_signal.get('status') == 'no_pods' or (pod_total <= 0 and pod_count <= 0):
                 status = 'pending'
             elif pod_signal.get('status') == 'unhealthy':
                 status = 'degraded'
+            elif pod_signal.get('status') == 'healthy':
+                status = 'healthy'
             elif readiness_ratio is not None:
                 if readiness_ratio < 0.5:
                     status = 'down'
@@ -1807,6 +2865,16 @@ class AIMonitoringAgent:
                     'prometheus_pod_count': pod_count,
                     'prometheus_restarts_10m': restarts_10m,
                     'prometheus_waiting_pods': waiting_pods,
+                    'pod_total_count': int(pod_signal.get('total_pods', 0) or 0),
+                    'pod_ready_count': int(pod_signal.get('ready_pods', 0) or 0),
+                    'pod_running_count': int(pod_signal.get('running_pods', 0) or 0),
+                    'pod_issue_count': int(pod_signal.get('issue_pods', 0) or 0),
+                    'desired_replicas': (
+                        int(pod_signal.get('desired_replicas'))
+                        if pod_signal.get('desired_replicas') is not None else None
+                    ),
+                    'workload_kind': str(pod_signal.get('workload_kind', '') or ''),
+                    'workload_name': str(pod_signal.get('workload_name', '') or ''),
                     'dependency_failures': 0,
                     'failed_dependencies': [],
                     'observed_dependencies': observed_dependencies,
@@ -1828,7 +2896,29 @@ class AIMonitoringAgent:
                 'namespace': namespace
             }
 
-        return self._evaluate_static_dependency_health(service_status)
+        evaluated_status = self._evaluate_static_dependency_health(service_status)
+        if isinstance(evaluated_status, dict) and evaluated_status:
+            self.service_registry.merge_from_status_map(evaluated_status)
+            return evaluated_status
+
+        # Hard guard: do not return empty when registry has known services.
+        registry_snapshot = self.service_registry.get_services_map()
+        if selected_pairs and registry_snapshot:
+            scoped_snapshot = {}
+            for key, svc in registry_snapshot.items():
+                if not isinstance(svc, dict):
+                    continue
+                ns = str(svc.get('namespace', '') or '').strip()
+                name = self._canonical_service(str(svc.get('name', '') or '').strip())
+                if not name and isinstance(key, str) and '/' in key:
+                    _, raw_name = key.split('/', 1)
+                    name = self._canonical_service(raw_name)
+                if (ns, name) in selected_pairs:
+                    scoped_snapshot[f"{ns}/{name}"] = svc
+            if scoped_snapshot:
+                return scoped_snapshot
+
+        return registry_snapshot if registry_snapshot else {}
         
     def start_monitoring(self):
         """Start the monitoring process in a separate thread"""
@@ -1838,6 +2928,7 @@ class AIMonitoringAgent:
         monitoring_thread = Thread(target=self.monitor_apis)
         monitoring_thread.daemon = True
         monitoring_thread.start()
+        self._start_live_snapshot_collector_if_needed()
         
         logger.info("Monitoring agent started in background thread")
         
@@ -1860,12 +2951,16 @@ class AIMonitoringAgent:
                 es_window_minutes = int(
                     self.config.get('monitoring', {}).get(
                         'incident_log_window_minutes',
-                        self.config.get('elasticsearch', {}).get('log_window_minutes', 720)
-                    ) or 720
+                        self.config.get('elasticsearch', {}).get('log_window_minutes', 5)
+                    ) or 5
                 )
                 es_window_minutes = max(5, es_window_minutes)
                 service_status = self.get_service_status(minutes=es_window_minutes)
-                self._last_service_status = service_status if isinstance(service_status, dict) else {}
+                if isinstance(service_status, dict) and service_status:
+                    self._last_service_status = service_status
+
+                # Live dashboard snapshots are produced by the dedicated
+                # `live-snapshot-collector` thread every 10 seconds.
                 self._seed_deterministic_memory_from_service_status(service_status)
                 
                 # Check for service errors
@@ -1913,39 +3008,14 @@ class AIMonitoringAgent:
 
                     trace_failure = self._has_trace_failure_signal(dependency_context)
                     actionable_by_rule = [a for a in actionable_anomalies if self._is_actionable_anomaly(a)]
-                    
-                    # Collect all services that have issues from service_status
-                    services_with_issues = set()
-                    for key, state in service_status.items():
-                        if isinstance(state, dict):
-                            status = str(state.get('status', '') or '').lower()
-                            root_cause = str(state.get('root_cause', '') or '').strip()
-                            exact_issue = str(state.get('exact_issue', '') or '').strip()
-                            # Also check recent_errors which contains the actual error messages
-                            recent_errors = state.get('recent_errors', []) or []
-                            has_recent_error = bool(recent_errors and len(recent_errors) > 0)
-                            
-                            if status in ['degraded', 'down', 'pending', 'warning', 'offline'] or root_cause or exact_issue or has_recent_error:
-                                services_with_issues.add(key)
-                    
-                    # Log for debugging
-                    if services_with_issues:
-                        logger.info(f"Services with issues to process: {list(services_with_issues)}")
-                    
-                    # Create incidents for services with issues even if no trace failure/anomaly
-                    # This ensures services with root cause detected still get incidents
-                    if not trace_failure and not actionable_by_rule and not services_with_issues:
-                        logger.info("Skipping incident: no trace failures, actionable anomalies, or services with issues")
+                    if not trace_failure and not actionable_by_rule:
+                        logger.info("Skipping incident: no trace failures or actionable anomalies")
                         time.sleep(check_interval)
                         continue
                     
-                    # Log what we're processing
-                    logger.info(f"Processing incidents for {len(services_with_issues)} services with issues: {list(services_with_issues)}")
-                    
                     grouped_anomalies = self._group_anomalies_by_service(actionable_anomalies)
 
-                    # Create incidents for services with issues (not just those with anomalies)
-                    for scoped_service in services_with_issues:
+                    for scoped_service, scoped_anomalies in grouped_anomalies.items():
                         scoped_logs_traces = self._filter_logs_traces_for_service(scoped_service, logs_traces)
                         scoped_dependency_context = self._scope_dependency_context_for_service(scoped_service, dependency_context)
                         scoped_service_status = {
@@ -1955,7 +3025,10 @@ class AIMonitoringAgent:
                         if not scoped_service_status and scoped_service in service_status:
                             scoped_service_status = {scoped_service: service_status.get(scoped_service, {})}
 
-                        scoped_anomalies = grouped_anomalies.get(scoped_service, [])
+                        trace_failure_scoped = self._has_trace_failure_signal(scoped_dependency_context)
+                        actionable_by_rule_scoped = [a for a in scoped_anomalies if self._is_actionable_anomaly(a)]
+                        if not trace_failure_scoped and not actionable_by_rule_scoped:
+                            continue
 
                         unresolved_count = int(self._service_unresolved_counter.get(scoped_service, 0) or 0)
                         es_cfg = self.config.setdefault('elasticsearch', {}) if isinstance(self.config, dict) else {}
@@ -2175,19 +3248,12 @@ class AIMonitoringAgent:
                                 if pod_reason:
                                     candidate_issues.append(pod_reason)
 
-                            for err in (state.get('recent_errors', []) or [])[:12]:
+                            for err in (state.get('recent_errors', []) or [])[:3]:
                                 if not isinstance(err, dict):
                                     continue
                                 msg = str(err.get('message', '') or '').strip()
                                 if msg:
                                     candidate_issues.append(msg)
-
-                            service_root = str(state.get('root_cause', '') or '').strip()
-                            if service_root:
-                                candidate_issues.append(service_root)
-                            service_exact = str(state.get('exact_issue', '') or '').strip()
-                            if service_exact:
-                                candidate_issues.append(service_exact)
 
                         deduped_issues: List[str] = []
                         seen_issue_keys = set()
@@ -2350,46 +3416,36 @@ class AIMonitoringAgent:
                         if top_issue:
                             enhanced_analysis['exact_issues'] = [top_issue]
 
-                        # Quick pre-check for obvious infrastructure issues - skip without AI
-                        issue_lower = str(top_issue or '').lower()
-                        is_obvious_infra = bool(re.search(
-                            r'(?i)connection\s+refused.*at\s+java\.net|connectexception.*connection\s+refused|'
-                            r'failed\s+to\s+connect.*ai-monitoring-agent|imagepullbackoff.*ai-monitoring|'
-                            r'crashloopbackoff.*startup|pending.*pod|ImagePullBackOff.*not found',
-                            issue_lower
-                        ))
-                        
-                        # Let AI decide - but skip obvious infrastructure issues immediately
-                        should_skip_pr = is_obvious_infra
-
-                        # Also skip incident creation for infrastructure issues
-                        should_skip_incident = is_obvious_infra
+                        # For source-fix mode, avoid PR attempts on non-deterministic
+                        # infra/runtime issues but still create incidents.
+                        should_skip_pr = bool(
+                            fix_mode_runtime == 'source_fix' and
+                            top_issue and
+                            not self._is_deterministic_fix_candidate(top_issue)
+                        )
 
                         structured_rca = self._structured_rca_from_issue(top_issue)
                         issue_scope = self._classify_issue_scope(top_issue)
                         if should_skip_pr:
                             logger.info(
-                                "Skipping PR and incident for %s: infrastructure issue detected. top_issue=%s",
+                                "PR skipped for %s: source_fix requires deterministic issue. top_issue=%s",
                                 str(primary_service or scoped_service or 'unknown'),
-                                (top_issue[:120] if isinstance(top_issue, str) else str(top_issue))
+                                (top_issue[:220] if isinstance(top_issue, str) else str(top_issue))
                             )
                             pr_metadata = {
                                 'status': 'Skipped',
-                                'reason': 'Infrastructure issue (connection/network) - not code-level',
+                                'reason': 'non-deterministic issue in source_fix mode',
                                 'mode': fix_mode_runtime,
                                 'scope': issue_scope
                             }
-                            # Don't create incident for infra issues - continue to next service
-                            continue
-                        
-                        logger.info(
-                            "PR evaluation for %s: mode=%s scope=%s issue=%s",
-                            str(primary_service or scoped_service or 'unknown'),
-                            fix_mode_runtime,
-                            issue_scope,
-                            (top_issue[:220] if isinstance(top_issue, str) else str(top_issue))
-                        )
-                        try:
+                        else:
+                            logger.info(
+                                "PR evaluation for %s: mode=%s scope=%s issue=%s",
+                                str(primary_service or scoped_service or 'unknown'),
+                                fix_mode_runtime,
+                                issue_scope,
+                                (top_issue[:220] if isinstance(top_issue, str) else str(top_issue))
+                            )
                             pr_metadata = self._create_code_fix_pr_stub(
                                 primary_service,
                                 top_issue,
@@ -2397,16 +3453,6 @@ class AIMonitoringAgent:
                                 structured_rca,
                                 enhanced_analysis
                             )
-                            logger.info(
-                                "PR result for %s: status=%s reason=%s",
-                                str(primary_service or scoped_service or 'unknown'),
-                                str(pr_metadata.get('status', 'unknown') or ''),
-                                str(pr_metadata.get('reason', '')[:100] if pr_metadata.get('reason') else '')
-                            )
-                        except Exception as pr_err:
-                            logger.error("PR creation failed with exception: %s", str(pr_err))
-                            pr_metadata = {'status': 'Error', 'reason': str(pr_err)}
-                        
                         incident = {
                             'id': f"INC-{int(time.time())}",
                             'timestamp': datetime.now().isoformat(),
@@ -2431,36 +3477,15 @@ class AIMonitoringAgent:
                                 break
 
                         if existing:
-                            # Check if existing incident is recent (within 15 min) - don't recreate
-                            existing_time = existing.get('timestamp', '')
-                            if existing_time:
-                                try:
-                                    existing_dt = datetime.fromisoformat(existing_time.replace('Z', '+00:00'))
-                                    if existing_dt.tzinfo is not None:
-                                        existing_dt = existing_dt.astimezone().replace(tzinfo=None)
-                                    age_minutes = (datetime.now() - existing_dt).total_seconds() / 60
-                                    if age_minutes < 15:
-                                        # Just update, don't recreate incident
-                                        existing['timestamp'] = incident['timestamp']
-                                        existing['metrics'] = incident['metrics']
-                                        existing['service_status'] = incident['service_status']
-                                        existing['anomalies'] = incident['anomalies']
-                                        existing['analysis'] = incident['analysis']
-                                        existing['similar_incidents'] = incident['similar_incidents']
-                                        existing['remedial_actions'] = incident['remedial_actions']
-                                        existing['dependency_context'] = incident['dependency_context']
-                                        # Don't mark as new incident - just update
-                                        skip_new_incident = True
-                                    else:
-                                        skip_new_incident = False
-                                except Exception:
-                                    skip_new_incident = False
-                            else:
-                                skip_new_incident = False
+                            existing['timestamp'] = incident['timestamp']
+                            existing['metrics'] = incident['metrics']
+                            existing['service_status'] = incident['service_status']
+                            existing['anomalies'] = incident['anomalies']
+                            existing['analysis'] = incident['analysis']
+                            existing['similar_incidents'] = incident['similar_incidents']
+                            existing['remedial_actions'] = incident['remedial_actions']
+                            existing['dependency_context'] = incident['dependency_context']
                         else:
-                            skip_new_incident = False
-
-                        if not skip_new_incident:
                             # Add to active incidents
                             self.active_incidents.append(incident)
 
@@ -2876,22 +3901,6 @@ class AIMonitoringAgent:
             return True
         if re.search(r'(?i)could\s+not\s+resolve\s+placeholder\s+[\'\"]?[a-zA-Z0-9_.-]+[\'\"]?', issue):
             return True
-        if re.search(r'(?i)placeholder.*not\s+found|missing.*config', issue):
-            return True
-        if re.search(r'(?i)oomkilled|out\s+of\s+memory|memory\s+limit|killed\s+by\s+memory', issue):
-            return True
-        if re.search(r'(?i)job\s+threw\s+an\s+unhandled\s+exception', issue):
-            return True
-        
-        # Allow ANY issue with an exception type - let Ollama try to generate fix
-        has_exception = bool(re.search(r'\b([a-zA-Z0-9_.$]+(?:Exception|Error))\b', issue, re.IGNORECASE))
-        if has_exception:
-            return True
-        
-        # Allow issues with clear error messages even without exceptions
-        if re.search(r'(?i)caused\s+by:|\bno\s+[a-z0-9_.\- ]{2,80}\s+found\b|\b(invalid|illegal|unsupported|unexpected|missing|required)\b', issue):
-            return True
-            
         return False
 
     def _recover_deterministic_issue_for_service(
@@ -2905,31 +3914,6 @@ class AIMonitoringAgent:
         service = str(service_key or '').strip()
         if not service:
             return ''
-
-        # Direct pattern check for enum issues - most reliable recovery
-        issue_lower = str(service_key or '').lower()
-        
-        # Check scoped_service_status for enum issues in any field
-        if isinstance(scoped_service_status, dict):
-            for svc_key, state in scoped_service_status.items():
-                if not isinstance(state, dict):
-                    continue
-                # Check all string fields in state for enum patterns
-                for field_name, field_value in state.items():
-                    if not isinstance(field_value, str):
-                        continue
-                    field_str = str(field_value or '').strip()
-                    if not field_str:
-                        continue
-                    # Direct enum pattern check
-                    if re.search(r'(?i)invalid\s+enum\s+value|enum\s+.*value\s+.*for\s+\w+\.\w+|unknown\s+name\s+value.*enum', field_str):
-                        if self._is_deterministic_fix_candidate(field_str):
-                            self._service_deterministic_issue_memory[service] = {
-                                'issue': field_str,
-                                'timestamp': datetime.now().isoformat()
-                            }
-                            logger.info("Direct enum recovery for %s: %s", service, field_str[:100])
-                            return field_str
 
         mem = self._service_deterministic_issue_memory.get(service, {}) if isinstance(self._service_deterministic_issue_memory, dict) else {}
         mem_issue = str(mem.get('issue', '') or '').strip()
@@ -3173,8 +4157,6 @@ class AIMonitoringAgent:
     def _derive_repo_name_for_service(self, service_name: str) -> str:
         """Map service name to expected repo name convention."""
         short = self._canonical_service(str(service_name or '').split('/')[-1])
-        
-        # Try config overrides first
         overrides = self.config.get('pr_automation', {}).get('repo_overrides', {}) if isinstance(self.config, dict) else {}
         if isinstance(overrides, dict):
             for key in [str(service_name or ''), short, str(service_name or '').split('/')[-1]]:
@@ -3188,40 +4170,13 @@ class AIMonitoringAgent:
                             return repo_value
                 elif str(override or '').strip():
                     return str(override).strip()
-        
-        # Hardcoded mappings for known services
         if short == 'cacheservice':
             return 'cache-service'
-        
+        if short == 'tripmanagement':
+            return 'trip-management-service'
+        if short == 'b2b-search-service':
+            return 'b2b-search-service'
         return short
-
-    def _derive_repo_url_for_service(self, service_name: str) -> List[str]:
-        """Generate list of possible repo URLs to try cloning."""
-        short = self._canonical_service(str(service_name or '').split('/')[-1])
-        repo_base_url = str(self.config.get('pr_automation', {}).get('repo_base_url', 'https://github.com/fabhotelstech') or 'https://github.com/fabhotelstech').rstrip('/')
-        
-        # Generate possible repo names
-        possible_names = [short]
-        
-        # Add variations based on service name patterns
-        if 'tripmanagement' in short.lower() or 'trip' in short.lower():
-            possible_names.extend(['trip-management-service', 'trip-management', 'tripmanagement-service'])
-        if 'booking' in short.lower():
-            possible_names.extend([f'{short}-service', short.replace('booking', 'booking-service')])
-        if 'b2b' in short.lower():
-            possible_names.extend([f'{short}-service'])
-        if 'bus-booking' in short.lower():
-            possible_names.extend(['bus-booking-search-service', 'bus-booking-service'])
-        
-        # Remove duplicates
-        possible_names = list(dict.fromkeys(possible_names))
-        
-        # Generate URLs
-        urls = []
-        for name in possible_names:
-            urls.append(f"{repo_base_url}/{name}.git")
-        
-        return urls
 
     def _derive_target_branch_for_service(self, service_name: str, default_branch: str) -> str:
         """Resolve per-service target branch override when configured."""
@@ -3330,7 +4285,6 @@ class AIMonitoringAgent:
             return result
 
         repo_name = self._derive_repo_name_for_service(service_name)
-        short = self._canonical_service(str(service_name or '').split('/')[-1])
         repo_base_url = str(cfg.get('repo_base_url', 'https://github.com/fabhotelstech') or 'https://github.com/fabhotelstech').rstrip('/')
         target_branch = self._derive_target_branch_for_service(
             service_name,
@@ -3354,62 +4308,41 @@ class AIMonitoringAgent:
             result['reason'] = f'Failed to prepare workspace: {e}'
             return result
 
-        # Try multiple possible repo URLs
-        possible_urls = self._derive_repo_url_for_service(service_name)
-        logger.info("Trying to clone repo for %s: attempting %d possible URLs", service_name, len(possible_urls))
-        
-        clone_success = False
-        cloned_url = None
-        clone_path = ''
-        
-        gh_token = str(os.getenv('GITHUB_TOKEN') or os.getenv('GH_TOKEN') or os.getenv('gh_token') or '').strip()
-        
-        for repo_url in possible_urls:
-            issue_hash = hashlib.sha1(f"{service_name}|{repo_url}".encode('utf-8')).hexdigest()[:10]
-            clone_path = os.path.join(workspace, f"{short}-{issue_hash}")
-            
-            if os.path.isdir(clone_path):
-                try:
-                    shutil.rmtree(clone_path)
-                except Exception:
-                    pass
-            
-            # Build clone command
-            clone_cmd = [
-                'git', 'clone', '--depth', '1', '--branch', target_branch,
-                repo_url, clone_path
-            ]
-            
-            logger.info("Clone attempt for %s: repo=%s branch=%s", service_name, repo_url, target_branch)
-            
-            if gh_token:
-                try:
-                    parsed = urlparse(repo_url)
-                    if parsed.scheme in {'http', 'https'} and parsed.netloc:
-                        safe_token = quote(gh_token, safe='')
-                        auth_url = f"{parsed.scheme}://x-access-token:{safe_token}@{parsed.netloc}{parsed.path}"
-                        if repo_url in clone_cmd:
-                            clone_cmd[clone_cmd.index(repo_url)] = auth_url
-                except Exception:
-                    pass
-            
-            clone_proc = subprocess.run(clone_cmd, capture_output=True, text=True, timeout=120)
-            
-            if clone_proc.returncode == 0:
-                clone_success = True
-                cloned_url = repo_url
-                logger.info("Clone succeeded for %s: repo=%s", service_name, repo_url)
-                break
-            else:
-                logger.info("Clone failed for %s: repo=%s, trying next...", service_name, repo_url)
-        
-        if not clone_success:
-            result['reason'] = f"Clone failed: Tried {len(possible_urls)} possible repos but none worked"
+        issue_hash = hashlib.sha1(f"{service_name}|{issue_text[:180]}".encode('utf-8')).hexdigest()[:10]
+        clone_path = os.path.join(workspace, f"{repo_name}-{issue_hash}")
+        result['clone_path'] = clone_path
+
+        if os.path.isdir(clone_path):
+            try:
+                shutil.rmtree(clone_path)
+            except Exception:
+                pass
+
+        clone_cmd = [
+            'git', 'clone', '--depth', '1', '--branch', target_branch,
+            result['repo_url'], clone_path
+        ]
+
+        # Support token-authenticated clone for private GitHub repos.
+        gh_token = str(os.getenv('GITHUB_TOKEN') or os.getenv('GH_TOKEN') or '').strip()
+        if gh_token:
+            try:
+                parsed = urlparse(result['repo_url'])
+                if parsed.scheme in {'http', 'https'} and parsed.netloc:
+                    safe_token = quote(gh_token, safe='')
+                    auth_url = f"{parsed.scheme}://x-access-token:{safe_token}@{parsed.netloc}{parsed.path}"
+                    # clone_cmd = ['git','clone','--depth','1','--branch',target_branch,repo_url,clone_path]
+                    # repo URL position is index 6
+                    clone_cmd[6] = auth_url
+            except Exception:
+                pass
+        clone_proc = subprocess.run(clone_cmd, capture_output=True, text=True, timeout=120)
+        if clone_proc.returncode != 0:
+            err_text = (clone_proc.stderr or clone_proc.stdout or '').strip()
+            # Never leak tokenized clone URL in surfaced error text.
+            err_text = re.sub(r'https://x-access-token:[^@]+@', 'https://x-access-token:***@', err_text)
+            result['reason'] = f"Clone failed: {err_text[:220]}"
             return result
-        
-        result['repo_url'] = cloned_url
-        result['clone_path'] = str(clone_path) if clone_path else ''
-        clone_path = str(clone_path) if clone_path else ''
 
         tokens = self._issue_search_tokens(issue_text, structured_rca)
         if not tokens:
@@ -4045,80 +4978,6 @@ class AIMonitoringAgent:
             outcome['reason'] = 'Repository clone path missing after analysis'
             return outcome
 
-        # Always try Ollama AI to generate code fix - let AI decide if fix is possible
-        modified = []
-        if hasattr(self, 'root_cause_analyzer') and self.root_cause_analyzer.is_llm_available():
-            # Read relevant files for context
-            repo_files = {}
-            for cand in candidates[:15]:
-                if isinstance(cand, dict):
-                    fpath = cand.get('path') or cand.get('file_path', '')
-                else:
-                    fpath = str(cand)
-                if fpath and os.path.isfile(fpath):
-                    try:
-                        with open(fpath, 'r', encoding='utf-8', errors='ignore') as fh:
-                            repo_files[fpath] = fh.read()
-                    except Exception:
-                        pass
-
-            if repo_files:
-                logger.info("Using AI (Ollama) to analyze issue and generate code fix for: %s", issue_text[:150])
-                fix_result = self.root_cause_analyzer.generate_code_fix(
-                    issue_description=issue_text,
-                    repo_files=repo_files,
-                    service_name=service_name
-                )
-                logger.info("AI fix generation result: ok=%s, fixes_count=%d", fix_result.get('ok'), len(fix_result.get('fixes', [])))
-                
-                if fix_result.get('ok'):
-                    for fix in fix_result.get('fixes', []):
-                        fix_file = fix.get('file', '')
-                        fix_code = fix.get('code', '')
-                        if fix_file and fix_code:
-                            # Find full path
-                            full_path = None
-                            for cf in candidates:
-                                cf_str = str(cf.get('path') or cf.get('file_path') or cf)
-                                if fix_file in cf_str or cf_str.endswith(fix_file):
-                                    full_path = cf_str
-                                    break
-                            if not full_path:
-                                # Try to find in clone_path
-                                for root, dirs, files in os.walk(clone_path):
-                                    for f in files:
-                                        if fix_file in f:
-                                            full_path = os.path.join(root, f)
-                                            break
-                            if full_path and os.path.isfile(full_path):
-                                try:
-                                    with open(full_path, 'r', encoding='utf-8', errors='ignore') as fh:
-                                        old_content = fh.read()
-                                    # Append fix code
-                                    new_content = old_content.rstrip() + '\n' + fix_code
-                                    with open(full_path, 'w', encoding='utf-8') as fh:
-                                        fh.write(new_content)
-                                    rel = os.path.relpath(full_path, clone_path)
-                                    modified.append(rel)
-                                    logger.info("AI applied fix to: %s", rel)
-                                except Exception as e:
-                                    logger.error("Failed to apply AI fix to %s: %s", full_path, e)
-
-        if not modified:
-            # If AI couldn't generate fix, try hardcoded patches as fallback
-            patch_result = self._apply_source_fix_patches(clone_path, issue_text, structured_rca, candidates)
-            if bool(patch_result.get('ok', False)):
-                raw_mod = patch_result.get('modified_files')
-                if isinstance(raw_mod, list):
-                    modified = raw_mod
-
-            if not modified:
-                # No fix could be generated
-                shutil.rmtree(clone_path, ignore_errors=True)
-                outcome['reason'] = str(patch_result.get('reason', 'No deterministic source fix available'))
-                return outcome
-            return outcome
-
         patch_result = self._apply_source_fix_patches(clone_path, issue_text, structured_rca, candidates)
         if not bool(patch_result.get('ok', False)):
             shutil.rmtree(clone_path, ignore_errors=True)
@@ -4235,34 +5094,21 @@ class AIMonitoringAgent:
     ) -> Dict[str, str]:
         """Strict guardrail so code PR suggestions are raised only with strong evidence."""
         pr_cfg = self.config.get('pr_automation', {}) if isinstance(self.config, dict) else {}
-        eligibility_mode = str(pr_cfg.get('eligibility_mode', 'permissive') or 'permissive').strip().lower()
+        eligibility_mode = str(pr_cfg.get('eligibility_mode', 'strict') or 'strict').strip().lower()
+        if issue_scope != 'code' and eligibility_mode != 'permissive':
+            issue_lower = str(issue_text or '').lower()
+            if issue_scope == 'config' and any(token in issue_lower for token in [
+                'oomkilled', 'oom killed', 'outofmemoryerror', 'memory limit', 'evicted',
+                'memory cgroup out of memory'
+            ]):
+                return {'eligible': 'true', 'reason': 'OOM/resource issue eligible for manifest fix PR'}
+            return {'eligible': 'false', 'reason': f'Issue scope is {issue_scope or "unknown"}'}
+
         issue = str(issue_text or '').strip()
-        issue_lower = issue.lower()
+        lower = issue.lower()
         structured = structured_rca if isinstance(structured_rca, dict) else {}
-        
-        # Always allow enum-related issues - these are real code bugs
-        if re.search(r'(?i)invalid\s+enum|enum.*value|unknown\s+name\s+value.*enum', issue):
-            logger.info(f"Enum issue detected - allowing PR: {issue[:100]}")
-            return {'eligible': 'true', 'reason': 'Enum value issue - code-level bug'}
-        
-        # OOM issues are eligible for k8s manifest PR
-        if any(token in issue_lower for token in [
-            'oomkilled', 'oom killed', 'outofmemoryerror', 'memory limit', 'evicted',
-            'memory cgroup out of memory'
-        ]):
-            return {'eligible': 'true', 'reason': 'OOM/resource issue eligible for manifest fix PR'}
-        
-        # Placeholder issues are eligible for code fix PR
-        if any(token in issue_lower for token in [
-            'could not resolve placeholder', 'couldn\'t resolve placeholder',
-            'placeholder', 'missing config'
-        ]):
-            return {'eligible': 'true', 'reason': 'Placeholder issue eligible for config fix PR'}
-        
-        # In permissive mode, allow more issues through
-        if eligibility_mode == 'permissive':
-            return {'eligible': 'true', 'reason': 'Permissive PR eligibility mode enabled'}
-        
+        confidence = float((analysis or {}).get('confidence', 0.0) or 0.0)
+
         if self._matches_ignored_log_pattern(issue):
             return {'eligible': 'false', 'reason': 'Matched ignored/noise log pattern'}
 
@@ -4274,16 +5120,49 @@ class AIMonitoringAgent:
             except re.error:
                 continue
 
-        # Allow code-level exceptions
-        if re.search(r'\b([a-zA-Z0-9_.$]+Exception|[a-zA-Z0-9_.$]+Error)\b', issue, re.IGNORECASE):
-            return {'eligible': 'true', 'reason': 'Code-level exception detected'}
+        if eligibility_mode == 'permissive':
+            return {'eligible': 'true', 'reason': 'Permissive PR eligibility mode enabled'}
 
-        # If we have exception name or code location, allow it
+        weak_markers = [
+            'high error rate', 'no explicit error message', 'error-pattern',
+            'dependency call failures', 'actionable failure detected', 'status_code=unknown'
+        ]
+        if any(marker in lower for marker in weak_markers):
+            return {'eligible': 'false', 'reason': 'Insufficient deterministic code-level evidence'}
+
+        if any(token in lower for token in [
+            'http 503', 'timeout', 'deadline exceeded', 'connection refused', 'crashloopbackoff',
+            'imagepullbackoff', 'errimagepull', 'pending', 'no pods'
+        ]):
+            # Allow strong code-level exceptions (e.g., InvalidDataAccessApiUsageException,
+            # IllegalArgumentException enum mapping errors) even if some infra tokens coexist.
+            if not re.search(r'\b((?:[a-zA-Z0-9_.$]+)(?:Exception|Error))\b', issue, re.IGNORECASE):
+                return {'eligible': 'false', 'reason': 'Infra/runtime symptoms detected'}
+
+        if any(token in lower for token in ['401', '403', 'unauthorized', 'forbidden', 'token', 'permission denied']):
+            return {'eligible': 'false', 'reason': 'Auth/config issue; not a direct code-fix PR candidate'}
+
         exception_name = str(structured.get('exception', '') or '')
-        if exception_name:
-            return {'eligible': 'true', 'reason': f'Exception {exception_name} detected'}
-        
-        return {'eligible': 'true', 'reason': 'Sufficient evidence for PR'}
+        enum_signal = bool(re.search(
+            r"(?i)\b(invalid|unknown|unsupported|unexpected|illegal)\b.{0,80}?\bvalue\b.{0,120}?\bfor\b\s+([a-zA-Z_][\w$]*(?:\.[A-Za-z_][\w$]*)+)",
+            issue
+        ))
+        has_code_location = bool(re.search(r'\.(java|kt|py|go):\d+|\.class\b', issue, flags=re.IGNORECASE))
+        if not exception_name and not has_code_location and not enum_signal:
+            return {'eligible': 'false', 'reason': 'Missing exception type or code location evidence'}
+
+        failing_service = str(structured.get('failing_service', '') or '').split('/')[-1]
+        primary = str(service_name or '').split('/')[-1]
+        if failing_service and primary and self._canonical_service(failing_service) != self._canonical_service(primary):
+            return {
+                'eligible': 'false',
+                'reason': f'Failure points to {failing_service}; do not raise PR in {primary} repo'
+            }
+
+        if confidence < 0.90:
+            return {'eligible': 'false', 'reason': f'Confidence too low ({confidence:.2f}); require >= 0.90'}
+
+        return {'eligible': 'true', 'reason': 'Strong code-level evidence and confidence'}
 
     def _create_code_fix_pr_stub(
         self,
@@ -4292,16 +5171,8 @@ class AIMonitoringAgent:
         issue_scope: str,
         structured_rca: Optional[Dict[str, str]] = None,
         analysis: Optional[Dict] = None
-        ) -> Dict[str, str]:
+    ) -> Dict[str, str]:
         """Create metadata for PR action. Real PR creation requires token/env outside code."""
-        # For OOM issues, skip service repo analysis and go directly to k8s manifest fix
-        issue_lower = str(issue_text or '').lower()
-        if any(token in issue_lower for token in [
-            'oomkilled', 'oom killed', 'outofmemoryerror', 'memory limit', 'evicted',
-            'memory cgroup out of memory'
-        ]):
-            return self._prepare_k8s_manifest_oom_pr_branch(service_name, issue_text, structured_rca, analysis)
-
         eligibility = self._assess_pr_eligibility(service_name, issue_text, issue_scope, structured_rca, analysis)
         if eligibility.get('eligible') != 'true':
             logger.info(
@@ -4311,8 +5182,6 @@ class AIMonitoringAgent:
                 str(eligibility.get('reason', ''))
             )
             return {'status': 'Not Eligible', 'url': '', 'reason': eligibility.get('reason', 'Issue scope is not code')}
-        
-        logger.info(f"PR eligible for {service_name}: {eligibility.get('reason', '')}")
 
         signature = f"{service_name}|{issue_text[:160]}"
         if signature in self._pr_created_signatures:
@@ -4363,21 +5232,15 @@ class AIMonitoringAgent:
             }
 
         fix_mode = str(cfg.get('fix_mode', 'report') or 'report').strip().lower()
-        allow_report_pr = bool(cfg.get('allow_analysis_report_pr', True))
-        logger.info(f"PR creation attempt: fix_mode={fix_mode}, allow_report_pr={allow_report_pr}, auto_create={auto_create}")
-        
+        allow_report_pr = bool(cfg.get('allow_analysis_report_pr', False))
         if fix_mode == 'source_fix':
             self._pr_attempted_signatures.add(signature)
             prepared = self._prepare_source_fix_pr_branch(service_name, issue_text, structured_rca, analysis)
-            logger.info(f"Source fix PR result: ok={prepared.get('ok')}, url={prepared.get('url', '')[:50] if prepared.get('url') else 'N/A'}")
             if prepared.get('ok') != 'true' and allow_report_pr:
-                logger.info("Falling back to repo analysis PR branch")
                 prepared = self._prepare_repo_analysis_pr_branch(service_name, issue_text, structured_rca, analysis)
         else:
             self._pr_attempted_signatures.add(signature)
-            logger.info("Using report mode - creating repo analysis PR")
             prepared = self._prepare_repo_analysis_pr_branch(service_name, issue_text, structured_rca, analysis)
-            logger.info(f"Analysis PR result: ok={prepared.get('ok')}, url={prepared.get('url', '')[:50] if prepared.get('url') else 'N/A'}, reason={prepared.get('reason', '')[:100]}")
         if prepared.get('ok') == 'true':
             self._pr_created_signatures.add(signature)
             logger.info("PR created for %s: %s", str(service_name or 'unknown'), str(prepared.get('url', '') or ''))
@@ -4702,103 +5565,89 @@ class AIMonitoringAgent:
             outcome['reason'] = "gh binary not found in ai-monitoring-agent container; install GitHub CLI in image"
             return outcome
 
-        # For OOM issues, clone k8s-manifest repo, not the service repo
-        cfg = self.config.get('pr_automation', {}) if isinstance(self.config, dict) else {}
-        repo_base_url = str(cfg.get('repo_base_url', 'https://github.com/fabhotelstech') or 'https://github.com/fabhotelstech').rstrip('/')
-        k8s_repo_url = f"{repo_base_url}/k8s-manifest.git"
-        workspace = str(cfg.get('workspace', '/tmp/ai-agent-pr-work') or '/tmp/ai-agent-pr-work')
-        short_service = self._canonical_service(str(service_name or '').split('/')[-1]) or 'service'
-        
+        pr_cfg = self.config.get('pr_automation', {}) if isinstance(self.config, dict) else {}
+        k8s_cfg = pr_cfg.get('k8s_manifest_repo', {}) if isinstance(pr_cfg.get('k8s_manifest_repo', {}), dict) else {}
+        repo_base_url = str(k8s_cfg.get('repo_base_url', pr_cfg.get('repo_base_url', 'https://github.com/fabhotelstech')) or 'https://github.com/fabhotelstech').rstrip('/')
+        repo_name = str(k8s_cfg.get('repo_name', 'k8s-manifest') or 'k8s-manifest').strip()
+        target_branch = str(k8s_cfg.get('target_branch', 'azure') or 'azure').strip()
+        workspace = str(pr_cfg.get('workspace', '/tmp/ai-agent-pr-work') or '/tmp/ai-agent-pr-work')
+
+        raw_service = str(service_name or '').strip()
+        if '/' in raw_service:
+            namespace_hint, service_part = raw_service.split('/', 1)
+            namespace = namespace_hint.strip().lower() or 'unknown'
+            service_short = self._canonical_service(service_part)
+        else:
+            namespace = str((structured_rca or {}).get('namespace', '') or 'unknown').strip().lower() or 'unknown'
+            service_short = self._canonical_service(raw_service)
+
+        repo_url = f"{repo_base_url}/{repo_name}.git"
+        issue_hash = hashlib.sha1(f"oom|{raw_service}|{issue_text[:160]}".encode('utf-8')).hexdigest()[:10]
+        clone_path = os.path.join(workspace, f"{repo_name}-{issue_hash}")
+
         try:
             os.makedirs(workspace, exist_ok=True)
+            if os.path.isdir(clone_path):
+                shutil.rmtree(clone_path)
         except Exception as e:
             outcome['reason'] = f'Failed to prepare workspace: {e}'
             return outcome
 
-        issue_hash = hashlib.sha1(f"oom-{service_name}|{issue_text[:80]}".encode('utf-8')).hexdigest()[:10]
-        clone_path = os.path.join(workspace, f"k8s-manifest-{issue_hash}")
-
-        gh_token = str(os.getenv('GITHUB_TOKEN') or os.getenv('GH_TOKEN') or os.getenv('gh_token') or '').strip()
-        
-        # Debug log
+        clone_cmd = ['git', 'clone', '--depth', '1', '--branch', target_branch, repo_url, clone_path]
+        gh_token = str(os.getenv('GITHUB_TOKEN') or os.getenv('GH_TOKEN') or '').strip()
         if gh_token:
-            logger.info("OOM PR: GitHub token found, will clone %s", k8s_repo_url)
-        else:
-            logger.warning("OOM PR: No GitHub token, will try anonymous clone")
-        
-        # Try multiple common branch names
-        branch_names = ['main', 'master', 'develop', 'develop_mercury']
-        clone_success = False
-        clone_proc = None
-        target_branch = 'main'
-        
-        for branch_name in branch_names:
-            clone_cmd = ['git', 'clone', '--depth', '1', '--branch', branch_name, k8s_repo_url, clone_path]
-            if gh_token:
-                try:
-                    parsed = urlparse(k8s_repo_url)
-                    if parsed.scheme in {'http', 'https'} and parsed.netloc:
-                        safe_token = quote(gh_token, safe='')
-                        auth_url = f"{parsed.scheme}://x-access-token:{safe_token}@{parsed.netloc}{parsed.path}"
-                        clone_cmd[5] = auth_url
-                except Exception:
-                    pass
-            
-            clone_proc = subprocess.run(clone_cmd, capture_output=True, text=True, timeout=120)
-            if clone_proc.returncode == 0:
-                clone_success = True
-                target_branch = branch_name
-                break
-            # Clean up failed clone attempt
-            if os.path.isdir(clone_path):
-                shutil.rmtree(clone_path, ignore_errors=True)
-        
-        if not clone_success:
-            err_text = (clone_proc.stderr or clone_proc.stdout or '').strip()[:200] if clone_proc else 'unknown'
-            outcome['reason'] = f"Clone failed: {k8s_repo_url} - {err_text}"
+            try:
+                parsed = urlparse(repo_url)
+                if parsed.scheme in {'http', 'https'} and parsed.netloc:
+                    safe_token = quote(gh_token, safe='')
+                    auth_url = f"{parsed.scheme}://x-access-token:{safe_token}@{parsed.netloc}{parsed.path}"
+                    clone_cmd[6] = auth_url
+            except Exception:
+                pass
+
+        clone_proc = subprocess.run(clone_cmd, capture_output=True, text=True, timeout=120)
+        if clone_proc.returncode != 0:
+            err_text = (clone_proc.stderr or clone_proc.stdout or '').strip()
+            err_text = re.sub(r'https://x-access-token:[^@]+@', 'https://x-access-token:***@', err_text)
+            outcome['reason'] = f'Clone failed: {err_text[:220]}'
             return outcome
 
-        repo_analysis = {
-            'ok': True,
-            'clone_path': clone_path,
-            'repo_url': k8s_repo_url,
-            'branch': 'main',
-            'repo_name': 'k8s-manifest'
-        }
-
-        clone_path = str(repo_analysis.get('clone_path', '') or '')
-        repo_url = str(repo_analysis.get('repo_url', '') or '')
-        target_branch = str(repo_analysis.get('branch', 'dev') or 'dev')
-        if not clone_path or not os.path.isdir(clone_path):
-            outcome['reason'] = 'Repository clone path missing after analysis'
-            return outcome
-
-        pr_cfg = self.config.get('pr_automation', {}) if isinstance(self.config, dict) else {}
         path_hints = pr_cfg.get('manifest_path_hints', []) if isinstance(pr_cfg.get('manifest_path_hints', []), list) else []
+        environment_roots = k8s_cfg.get('environment_roots', {}) if isinstance(k8s_cfg.get('environment_roots', {}), dict) else {}
+        namespace_roots = []
+        if namespace in environment_roots and isinstance(environment_roots.get(namespace), list):
+            namespace_roots.extend([str(item).strip().strip('/') for item in environment_roots.get(namespace, []) if str(item).strip()])
+        if not namespace_roots and namespace not in {'', 'unknown'}:
+            namespace_roots.append(namespace)
+        if not namespace_roots:
+            namespace_roots = ['jupiter', 'venus']
 
-        service_short = self._canonical_service(str(service_name or '').split('/')[-1])
         candidates: List[str] = []
 
         for hint in path_hints:
             rel = str(hint or '').strip().lstrip('/')
-            if rel:
-                fpath = os.path.join(clone_path, rel)
-                if os.path.isfile(fpath):
+            if not rel:
+                continue
+            rel = rel.replace('{namespace}', namespace).replace('{service}', service_short)
+            fpath = os.path.join(clone_path, rel)
+            if os.path.isfile(fpath):
+                candidates.append(fpath)
+
+        for root_hint in namespace_roots:
+            search_root = os.path.join(clone_path, root_hint)
+            if not os.path.isdir(search_root):
+                continue
+            for root, dirs, files in os.walk(search_root):
+                dirs[:] = [d for d in dirs if d not in {'.git', 'target', 'build', 'dist', 'node_modules', '__pycache__'}]
+                for fname in files:
+                    if not (fname.endswith('.yaml') or fname.endswith('.yml')):
+                        continue
+                    fpath = os.path.join(root, fname)
+                    rel = os.path.relpath(fpath, clone_path).replace('\\\\', '/').lower()
+                    if 'deployment' not in rel:
+                        continue
                     candidates.append(fpath)
 
-        for root, dirs, files in os.walk(clone_path):
-            dirs[:] = [d for d in dirs if d not in {'.git', 'target', 'build', 'dist', 'node_modules', '__pycache__'}]
-            for fname in files:
-                if not (fname.endswith('.yaml') or fname.endswith('.yml')):
-                    continue
-                fpath = os.path.join(root, fname)
-                rel = os.path.relpath(fpath, clone_path).replace('\\\\', '/').lower()
-                if 'deployment' not in rel:
-                    continue
-                if service_short and service_short in rel:
-                    candidates.append(fpath)
-
-        # De-duplicate preserving order
         uniq = []
         seen = set()
         for p in candidates:
@@ -4806,7 +5655,7 @@ class AIMonitoringAgent:
                 continue
             seen.add(p)
             uniq.append(p)
-        candidates = uniq[:40]
+        candidates = uniq[:120]
 
         modified_files: List[str] = []
 
@@ -4826,6 +5675,14 @@ class AIMonitoringAgent:
                 with open(fpath, 'r', encoding='utf-8', errors='ignore') as fh:
                     content = fh.read()
             except Exception:
+                continue
+
+            low = content.lower()
+            if 'kind: deployment' not in low:
+                continue
+            if namespace not in {'', 'unknown'} and f"namespace: {namespace}" not in low:
+                continue
+            if service_short and not re.search(rf'(?im)^\s*name\s*:\s*{re.escape(service_short)}\s*$', content):
                 continue
 
             new_content = content
@@ -6033,31 +6890,11 @@ class AIMonitoringAgent:
         anomalies = incident.get('anomalies', [])
         if anomalies:
             service = anomalies[0].get('service', 'unknown')
-        
-        # Smart dedup: group by service + issue category, not exact text
         issue = exact[0] if exact else analysis.get('summary', 'unknown')
-        
-        # Normalize issue to category for better dedup
-        issue_lower = str(issue).lower()
-        if 'enum' in issue_lower or 'invalid' in issue_lower:
-            issue_category = 'enum_error'
-        elif 'connectexception' in issue_lower or 'connection refused' in issue_lower:
-            issue_category = 'connection_issue'
-        elif 'timeout' in issue_lower:
-            issue_category = 'timeout_issue'
-        elif 'placeholder' in issue_lower or 'missing' in issue_lower:
-            issue_category = 'config_issue'
-        elif 'exception' in issue_lower:
-            issue_category = 'code_exception'
-        else:
-            issue_category = 'general'
-        
-        # Remove trace IDs and noise for dedup
         issue = re.sub(r'\|\s*sample:\s*.*$', '', str(issue), flags=re.IGNORECASE)
         issue = re.sub(r'trace_id=[a-zA-Z0-9]+', 'trace_id=*', str(issue))
         issue = re.sub(r'\s+', ' ', str(issue)).strip()
-        
-        return f"{service}|{issue_category}"
+        return f"{service}|{issue}"
 
     def _is_incident_resolved(self, incident: Dict, service_status: Dict) -> bool:
         """Check whether active incident should be auto-resolved."""
@@ -6096,14 +6933,6 @@ class AIMonitoringAgent:
     def _is_actionable_anomaly(self, anomaly: Dict) -> bool:
         """Gate anomalies strictly for war-mode incident generation."""
         if not isinstance(anomaly, dict):
-            return False
-
-        # Always skip ConnectException - too noisy, not actionable
-        sample_error = str(anomaly.get('sample_error', '') or '').lower()
-        if 'connectexception' in sample_error or 'connection refused' in sample_error:
-            return False
-        sample_message = str(anomaly.get('message', '') or '').lower()
-        if 'connectexception' in sample_message or 'connection refused' in sample_message:
             return False
 
         anomaly_type = str(anomaly.get('type', '') or '')
@@ -6203,6 +7032,10 @@ class AIMonitoringAgent:
             # Deep-merge config so partial dashboard updates do not erase required keys
             merged_config = dict(self.config)
             for key, value in new_config.items():
+                # Runtime service scope is managed via monitored_services + registry.
+                # Ignore legacy direct `services` replacements from config writes.
+                if key == 'services':
+                    continue
                 if isinstance(value, dict) and isinstance(merged_config.get(key), dict):
                     merged_section = dict(merged_config.get(key, {}))
                     merged_section.update(value)

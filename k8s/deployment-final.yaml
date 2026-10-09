@@ -1,0 +1,56 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-monitoring-agent
+  namespace: ai-monitoring
+  labels:
+    app: ai-monitoring-agent
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ai-monitoring-agent
+  template:
+    metadata:
+      labels:
+        app: ai-monitoring-agent
+    spec:
+      containers:
+      - name: ai-monitoring-agent
+        image: ai-monitoring-agent:latest
+        ports:
+        - containerPort: 5000
+        env:
+        - name: FLASK_ENV
+          value: "production"
+        volumeMounts:
+        - name: config-volume
+          mountPath: /app/config.json
+          subPath: config.json
+        - name: models-volume
+          mountPath: /app/models
+        resources:
+          requests:
+            memory: "512Mi"
+            cpu: "250m"
+          limits:
+            memory: "1Gi"
+            cpu: "500m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 30
+          periodSeconds: 10
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 5000
+          initialDelaySeconds: 5
+          periodSeconds: 5
+      volumes:
+      - name: config-volume
+        configMap:
+          name: ai-monitoring-agent-config
+      - name: models-volume
+        emptyDir: {}

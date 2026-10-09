@@ -31,16 +31,22 @@ RUN pip install --no-cache-dir -r requirements-light.txt
 COPY . .
 RUN find . -name "*.py" -exec chmod +x {} \;
 
-# Create models directory
-RUN mkdir -p /app/models
+# Create models directory and CodeXA workspace
+RUN mkdir -p /app/models /var/otel/codexa-workspace
 
 # Install kubectl for service monitoring
 RUN curl -LO "https://dl.k8s.io/release/$(curl -L -s https://dl.k8s.io/release/stable.txt)/bin/linux/amd64/kubectl" && \
     install -o root -g root -m 0755 kubectl /usr/local/bin/kubectl
 
+# Configure git for CodeXA
+RUN git config --global user.name "CodeXA" && \
+    git config --global user.email "codexa@fabhotels.com" && \
+    git config --global init.defaultBranch main && \
+    git config --global --add safe.directory '*'
+
 # Create non-root user
 RUN adduser --disabled-password --gecos '' appuser
-RUN chown -R appuser:appuser /app
+RUN chown -R appuser:appuser /app /var/otel/codexa-workspace
 USER appuser
 ENV PATH="$PATH:/usr/local/bin"
 ENV OLLAMA_MODELS="/app/models"
