@@ -1,0 +1,784 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Admin Panel - AI Monitoring</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --void:#04070a; --deep:#080e14; --surface:#0c1520; --raised:#111d2a; --overlay:#162130;
+      --rim:rgba(255,255,255,.08); --rim2:rgba(255,255,255,.14);
+      --ink:#dde6ef; --ink2:#7a8fa3; --ink3:#3d5166;
+      --cyan:#0df2d0; --cyan-dim:rgba(13,242,208,.12);
+      --red:#ff3d57; --red-dim:rgba(255,61,87,.12);
+      --green:#00e87a; --green-dim:rgba(0,232,122,.1);
+      --yellow:#ffc107; --yellow-dim:rgba(255,193,7,.12);
+      --mono:'Space Mono',monospace; --sans:'DM Sans',sans-serif;
+    }
+    * { box-sizing:border-box; margin:0; padding:0; }
+    body {
+      background:var(--void);
+      color:var(--ink);
+      font-family:var(--sans);
+      min-height:100vh;
+      background-image:
+        radial-gradient(ellipse at 50% 0%, rgba(13,242,208,.08) 0%, transparent 50%),
+        radial-gradient(ellipse at 80% 80%, rgba(13,242,208,.04) 0%, transparent 40%);
+    }
+
+    /* Header */
+    .header {
+      background:var(--surface);
+      border-bottom:1px solid var(--rim2);
+      padding:16px 24px;
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+    }
+    .header-left {
+      display:flex;
+      align-items:center;
+      gap:20px;
+    }
+    .logo {
+      font-family:var(--mono);
+      font-size:14px;
+      letter-spacing:.15em;
+      text-transform:uppercase;
+      color:var(--cyan);
+    }
+    .header-title {
+      font-size:18px;
+      font-weight:500;
+      color:var(--ink);
+    }
+    .header-right {
+      display:flex;
+      align-items:center;
+      gap:16px;
+    }
+    .user-info {
+      font-size:13px;
+      color:var(--ink2);
+    }
+    .user-info strong {
+      color:var(--ink);
+    }
+    .btn {
+      display:inline-flex;
+      align-items:center;
+      gap:6px;
+      padding:8px 16px;
+      border-radius:6px;
+      font-size:13px;
+      font-weight:500;
+      cursor:pointer;
+      transition:all .15s;
+      text-decoration:none;
+      border:none;
+    }
+    .btn-ghost {
+      background:transparent;
+      border:1px solid var(--rim2);
+      color:var(--ink2);
+    }
+    .btn-ghost:hover {
+      background:var(--overlay);
+      color:var(--ink);
+    }
+    .btn-primary {
+      background:linear-gradient(135deg, var(--cyan) 0%, #0ac4a8 100%);
+      color:var(--void);
+    }
+    .btn-primary:hover {
+      transform:translateY(-1px);
+      box-shadow:0 4px 12px rgba(13,242,208,.3);
+    }
+    .btn-danger {
+      background:var(--red-dim);
+      border:1px solid rgba(255,61,87,.3);
+      color:var(--red);
+    }
+    .btn-danger:hover {
+      background:rgba(255,61,87,.2);
+    }
+    .btn-sm {
+      padding:6px 12px;
+      font-size:11px;
+    }
+
+    /* Main Content */
+    .main {
+      max-width:1200px;
+      margin:0 auto;
+      padding:32px 24px;
+    }
+
+    /* Section Card */
+    .section {
+      background:var(--surface);
+      border:1px solid var(--rim2);
+      border-radius:12px;
+      margin-bottom:24px;
+      overflow:hidden;
+    }
+    .section-header {
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      padding:16px 20px;
+      border-bottom:1px solid var(--rim);
+      background:var(--raised);
+    }
+    .section-title {
+      font-family:var(--mono);
+      font-size:11px;
+      text-transform:uppercase;
+      letter-spacing:.1em;
+      color:var(--cyan);
+    }
+    .section-body {
+      padding:20px;
+    }
+
+    /* Settings Grid */
+    .settings-grid {
+      display:grid;
+      grid-template-columns:repeat(auto-fit, minmax(280px, 1fr));
+      gap:20px;
+    }
+    .setting-item {
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      padding:16px;
+      background:var(--deep);
+      border:1px solid var(--rim);
+      border-radius:8px;
+    }
+    .setting-label {
+      display:flex;
+      flex-direction:column;
+      gap:4px;
+    }
+    .setting-name {
+      font-size:14px;
+      font-weight:500;
+      color:var(--ink);
+    }
+    .setting-desc {
+      font-size:12px;
+      color:var(--ink3);
+    }
+
+    /* Toggle Switch */
+    .toggle {
+      position:relative;
+      width:48px;
+      height:26px;
+    }
+    .toggle input {
+      opacity:0;
+      width:0;
+      height:0;
+    }
+    .toggle-slider {
+      position:absolute;
+      cursor:pointer;
+      top:0; left:0; right:0; bottom:0;
+      background:var(--overlay);
+      border:1px solid var(--rim2);
+      border-radius:26px;
+      transition:all .2s;
+    }
+    .toggle-slider:before {
+      position:absolute;
+      content:"";
+      height:18px;
+      width:18px;
+      left:3px;
+      bottom:3px;
+      background:var(--ink3);
+      border-radius:50%;
+      transition:all .2s;
+    }
+    .toggle input:checked + .toggle-slider {
+      background:var(--cyan-dim);
+      border-color:var(--cyan);
+    }
+    .toggle input:checked + .toggle-slider:before {
+      transform:translateX(22px);
+      background:var(--cyan);
+    }
+
+    /* Users Table */
+    .users-table {
+      width:100%;
+      border-collapse:collapse;
+    }
+    .users-table th,
+    .users-table td {
+      padding:12px 16px;
+      text-align:left;
+      border-bottom:1px solid var(--rim);
+    }
+    .users-table th {
+      font-family:var(--mono);
+      font-size:10px;
+      text-transform:uppercase;
+      letter-spacing:.08em;
+      color:var(--ink3);
+      background:var(--deep);
+    }
+    .users-table td {
+      font-size:13px;
+      color:var(--ink);
+    }
+    .users-table tr:hover td {
+      background:var(--overlay);
+    }
+    .users-table tr:last-child td {
+      border-bottom:none;
+    }
+
+    /* Badges */
+    .badge {
+      display:inline-block;
+      padding:4px 8px;
+      border-radius:4px;
+      font-family:var(--mono);
+      font-size:10px;
+      text-transform:uppercase;
+      letter-spacing:.05em;
+    }
+    .badge-admin {
+      background:var(--cyan-dim);
+      color:var(--cyan);
+    }
+    .badge-viewer {
+      background:var(--overlay);
+      color:var(--ink2);
+    }
+    .badge-active {
+      background:var(--green-dim);
+      color:var(--green);
+    }
+    .badge-inactive {
+      background:var(--red-dim);
+      color:var(--red);
+    }
+
+    /* Actions */
+    .actions {
+      display:flex;
+      gap:8px;
+    }
+
+    /* Modal */
+    .modal-overlay {
+      position:fixed;
+      top:0; left:0; right:0; bottom:0;
+      background:rgba(0,0,0,.7);
+      display:flex;
+      align-items:center;
+      justify-content:center;
+      z-index:1000;
+      opacity:0;
+      visibility:hidden;
+      transition:all .2s;
+    }
+    .modal-overlay.active {
+      opacity:1;
+      visibility:visible;
+    }
+    .modal {
+      background:var(--surface);
+      border:1px solid var(--rim2);
+      border-radius:12px;
+      width:100%;
+      max-width:440px;
+      box-shadow:0 20px 60px rgba(0,0,0,.5);
+      transform:translateY(-20px);
+      transition:transform .2s;
+    }
+    .modal-overlay.active .modal {
+      transform:translateY(0);
+    }
+    .modal-header {
+      display:flex;
+      justify-content:space-between;
+      align-items:center;
+      padding:16px 20px;
+      border-bottom:1px solid var(--rim);
+    }
+    .modal-title {
+      font-size:16px;
+      font-weight:500;
+      color:var(--ink);
+    }
+    .modal-close {
+      background:none;
+      border:none;
+      color:var(--ink3);
+      cursor:pointer;
+      font-size:20px;
+      padding:4px;
+      line-height:1;
+    }
+    .modal-close:hover {
+      color:var(--ink);
+    }
+    .modal-body {
+      padding:20px;
+    }
+    .modal-footer {
+      display:flex;
+      justify-content:flex-end;
+      gap:12px;
+      padding:16px 20px;
+      border-top:1px solid var(--rim);
+      background:var(--deep);
+    }
+
+    /* Form */
+    .form-group {
+      margin-bottom:16px;
+    }
+    .form-label {
+      display:block;
+      font-family:var(--mono);
+      font-size:10px;
+      text-transform:uppercase;
+      letter-spacing:.08em;
+      color:var(--ink3);
+      margin-bottom:8px;
+    }
+    .form-input, .form-select {
+      width:100%;
+      background:var(--deep);
+      border:1px solid var(--rim);
+      border-radius:6px;
+      padding:12px 14px;
+      font-size:14px;
+      color:var(--ink);
+      font-family:var(--sans);
+      transition:border-color .2s, box-shadow .2s;
+    }
+    .form-input:focus, .form-select:focus {
+      outline:none;
+      border-color:var(--cyan);
+      box-shadow:0 0 0 3px rgba(13,242,208,.12);
+    }
+    .form-input::placeholder {
+      color:var(--ink3);
+    }
+    .form-select {
+      cursor:pointer;
+      appearance:none;
+      background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' width='12' height='12' viewBox='0 0 12 12'%3E%3Cpath fill='%237a8fa3' d='M6 8L1 3h10z'/%3E%3C/svg%3E");
+      background-repeat:no-repeat;
+      background-position:right 12px center;
+      padding-right:36px;
+    }
+    .form-select option {
+      background:var(--surface);
+      color:var(--ink);
+    }
+
+    /* Empty State */
+    .empty-state {
+      text-align:center;
+      padding:48px 20px;
+      color:var(--ink3);
+    }
+    .empty-state-icon {
+      font-size:48px;
+      margin-bottom:16px;
+      opacity:.5;
+    }
+    .empty-state-text {
+      font-size:14px;
+    }
+
+    /* Alert */
+    .alert {
+      padding:12px 16px;
+      border-radius:8px;
+      font-size:13px;
+      margin-bottom:16px;
+      display:none;
+    }
+    .alert.show {
+      display:block;
+    }
+    .alert-success {
+      background:var(--green-dim);
+      border:1px solid rgba(0,232,122,.3);
+      color:var(--green);
+    }
+    .alert-error {
+      background:var(--red-dim);
+      border:1px solid rgba(255,61,87,.3);
+      color:var(--red);
+    }
+
+    /* Responsive */
+    @media (max-width: 768px) {
+      .header {
+        flex-direction:column;
+        gap:12px;
+        padding:12px 16px;
+      }
+      .main {
+        padding:16px;
+      }
+      .users-table {
+        display:block;
+        overflow-x:auto;
+      }
+    }
+  </style>
+</head>
+<body>
+  <header class="header">
+    <div class="header-left">
+      <div class="logo">AI Monitor</div>
+      <div class="header-title">Admin Panel</div>
+    </div>
+    <div class="header-right">
+      <span class="user-info">Logged in as <strong>{{ current_user.name or current_user.username }}</strong></span>
+      <a href="{{ url_for('ai_agent_redirect') }}" class="btn btn-ghost">Back to Dashboard</a>
+      <a href="{{ url_for('logout') }}" class="btn btn-ghost">Logout</a>
+    </div>
+  </header>
+
+  <main class="main">
+    <div id="alertBox" class="alert"></div>
+
+    <!-- Settings Section -->
+    <section class="section">
+      <div class="section-header">
+        <h2 class="section-title">Authentication Settings</h2>
+      </div>
+      <div class="section-body">
+        <div class="settings-grid">
+          <div class="setting-item">
+            <div class="setting-label">
+              <span class="setting-name">Enable Authentication</span>
+              <span class="setting-desc">Require login to access the dashboard</span>
+            </div>
+            <label class="toggle">
+              <input type="checkbox" id="authEnabled" {% if settings.auth_enabled %}checked{% endif %} onchange="updateSetting('auth_enabled', this.checked)" />
+              <span class="toggle-slider"></span>
+            </label>
+          </div>
+          <div class="setting-item">
+            <div class="setting-label">
+              <span class="setting-name">Session Timeout</span>
+              <span class="setting-desc">Hours before requiring re-login</span>
+            </div>
+            <select class="form-select" style="width:100px" id="sessionTimeout" onchange="updateSetting('session_timeout_hours', parseInt(this.value))">
+              <option value="1" {% if settings.session_timeout_hours == 1 %}selected{% endif %}>1 hour</option>
+              <option value="4" {% if settings.session_timeout_hours == 4 %}selected{% endif %}>4 hours</option>
+              <option value="8" {% if settings.session_timeout_hours == 8 %}selected{% endif %}>8 hours</option>
+              <option value="24" {% if settings.session_timeout_hours == 24 or not settings.session_timeout_hours %}selected{% endif %}>24 hours</option>
+              <option value="72" {% if settings.session_timeout_hours == 72 %}selected{% endif %}>3 days</option>
+              <option value="168" {% if settings.session_timeout_hours == 168 %}selected{% endif %}>7 days</option>
+            </select>
+          </div>
+        </div>
+      </div>
+    </section>
+
+    <!-- Users Section -->
+    <section class="section">
+      <div class="section-header">
+        <h2 class="section-title">User Management</h2>
+        <button class="btn btn-primary btn-sm" onclick="openAddUserModal()">+ Add User</button>
+      </div>
+      <div class="section-body" style="padding:0">
+        <table class="users-table">
+          <thead>
+            <tr>
+              <th>Username</th>
+              <th>Name</th>
+              <th>Role</th>
+              <th>Status</th>
+              <th>Created</th>
+              <th>Actions</th>
+            </tr>
+          </thead>
+          <tbody id="usersTableBody">
+            {% for user in users %}
+            <tr data-user-id="{{ user.id }}">
+              <td>{{ user.username }}</td>
+              <td>{{ user.name or '-' }}</td>
+              <td><span class="badge badge-{{ user.role }}">{{ user.role }}</span></td>
+              <td><span class="badge badge-{{ 'active' if user.active else 'inactive' }}">{{ 'Active' if user.active else 'Inactive' }}</span></td>
+              <td>{{ user.created_at[:10] if user.created_at else '-' }}</td>
+              <td>
+                <div class="actions">
+                  <button class="btn btn-ghost btn-sm" onclick="openEditUserModal('{{ user.id }}')">Edit</button>
+                  {% if user.id != current_user.id %}
+                  <button class="btn btn-danger btn-sm" onclick="deleteUser('{{ user.id }}', '{{ user.username }}')">Delete</button>
+                  {% endif %}
+                </div>
+              </td>
+            </tr>
+            {% else %}
+            <tr>
+              <td colspan="6">
+                <div class="empty-state">
+                  <div class="empty-state-icon">&#128100;</div>
+                  <div class="empty-state-text">No users found. Click "Add User" to create the first user.</div>
+                </div>
+              </td>
+            </tr>
+            {% endfor %}
+          </tbody>
+        </table>
+      </div>
+    </section>
+  </main>
+
+  <!-- Add/Edit User Modal -->
+  <div class="modal-overlay" id="userModal">
+    <div class="modal">
+      <div class="modal-header">
+        <h3 class="modal-title" id="modalTitle">Add User</h3>
+        <button class="modal-close" onclick="closeModal()">&times;</button>
+      </div>
+      <div class="modal-body">
+        <form id="userForm" onsubmit="submitUserForm(event)">
+          <input type="hidden" id="userId" value="" />
+          <div class="form-group">
+            <label class="form-label" for="formUsername">Username</label>
+            <input type="text" id="formUsername" class="form-input" placeholder="Enter username" required minlength="3" />
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="formName">Display Name</label>
+            <input type="text" id="formName" class="form-input" placeholder="Enter display name" />
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="formPassword">Password</label>
+            <input type="password" id="formPassword" class="form-input" placeholder="Enter password (min 6 characters)" minlength="6" />
+          </div>
+          <div class="form-group">
+            <label class="form-label" for="formRole">Role</label>
+            <select id="formRole" class="form-select">
+              <option value="viewer">Viewer - Can view dashboard only</option>
+              <option value="admin">Admin - Full access including user management</option>
+            </select>
+          </div>
+          <div class="form-group" id="activeGroup" style="display:none">
+            <label class="form-label">Status</label>
+            <label class="toggle" style="display:inline-flex">
+              <input type="checkbox" id="formActive" checked />
+              <span class="toggle-slider"></span>
+            </label>
+            <span style="margin-left:12px;font-size:13px;color:var(--ink2)">Active</span>
+          </div>
+        </form>
+      </div>
+      <div class="modal-footer">
+        <button class="btn btn-ghost" onclick="closeModal()">Cancel</button>
+        <button class="btn btn-primary" onclick="submitUserForm(event)">Save User</button>
+      </div>
+    </div>
+  </div>
+
+  <script>
+    const currentUserId = '{{ current_user.id }}';
+    let usersCache = [];
+
+    // Load users on page load
+    document.addEventListener('DOMContentLoaded', loadUsers);
+
+    async function loadUsers() {
+      try {
+        const resp = await fetch('/ai-agent/api/admin/users');
+        const data = await resp.json();
+        usersCache = data.users || [];
+        renderUsersTable(usersCache);
+      } catch (err) {
+        console.error('Failed to load users:', err);
+      }
+    }
+
+    function renderUsersTable(users) {
+      const tbody = document.getElementById('usersTableBody');
+      if (!users.length) {
+        tbody.innerHTML = `
+          <tr><td colspan="6">
+            <div class="empty-state">
+              <div class="empty-state-icon">&#128100;</div>
+              <div class="empty-state-text">No users found. Click "Add User" to create the first user.</div>
+            </div>
+          </td></tr>`;
+        return;
+      }
+      tbody.innerHTML = users.map(user => `
+        <tr data-user-id="${user.id}">
+          <td>${escapeHtml(user.username)}</td>
+          <td>${escapeHtml(user.name || '-')}</td>
+          <td><span class="badge badge-${user.role}">${user.role}</span></td>
+          <td><span class="badge badge-${user.active ? 'active' : 'inactive'}">${user.active ? 'Active' : 'Inactive'}</span></td>
+          <td>${user.created_at ? user.created_at.slice(0, 10) : '-'}</td>
+          <td>
+            <div class="actions">
+              <button class="btn btn-ghost btn-sm" onclick="openEditUserModal('${user.id}')">Edit</button>
+              ${user.id !== currentUserId ? `<button class="btn btn-danger btn-sm" onclick="deleteUser('${user.id}', '${escapeHtml(user.username)}')">Delete</button>` : ''}
+            </div>
+          </td>
+        </tr>
+      `).join('');
+    }
+
+    function escapeHtml(text) {
+      const div = document.createElement('div');
+      div.textContent = text;
+      return div.innerHTML;
+    }
+
+    function showAlert(message, type = 'success') {
+      const alert = document.getElementById('alertBox');
+      alert.textContent = message;
+      alert.className = `alert show alert-${type}`;
+      setTimeout(() => alert.classList.remove('show'), 4000);
+    }
+
+    async function updateSetting(key, value) {
+      try {
+        const resp = await fetch('/ai-agent/api/admin/settings', {
+          method: 'PUT',
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify({ [key]: value })
+        });
+        const data = await resp.json();
+        if (data.success) {
+          showAlert('Settings updated successfully');
+        } else {
+          showAlert(data.error || 'Failed to update settings', 'error');
+        }
+      } catch (err) {
+        showAlert('Failed to update settings', 'error');
+      }
+    }
+
+    function openAddUserModal() {
+      document.getElementById('modalTitle').textContent = 'Add User';
+      document.getElementById('userId').value = '';
+      document.getElementById('formUsername').value = '';
+      document.getElementById('formUsername').disabled = false;
+      document.getElementById('formName').value = '';
+      document.getElementById('formPassword').value = '';
+      document.getElementById('formPassword').required = true;
+      document.getElementById('formPassword').placeholder = 'Enter password (min 6 characters)';
+      document.getElementById('formRole').value = 'viewer';
+      document.getElementById('formActive').checked = true;
+      document.getElementById('activeGroup').style.display = 'none';
+      document.getElementById('userModal').classList.add('active');
+    }
+
+    function openEditUserModal(userId) {
+      const user = usersCache.find(u => u.id === userId);
+      if (!user) return;
+
+      document.getElementById('modalTitle').textContent = 'Edit User';
+      document.getElementById('userId').value = user.id;
+      document.getElementById('formUsername').value = user.username;
+      document.getElementById('formUsername').disabled = true;
+      document.getElementById('formName').value = user.name || '';
+      document.getElementById('formPassword').value = '';
+      document.getElementById('formPassword').required = false;
+      document.getElementById('formPassword').placeholder = 'Leave blank to keep current password';
+      document.getElementById('formRole').value = user.role;
+      document.getElementById('formActive').checked = user.active !== false;
+      document.getElementById('activeGroup').style.display = 'block';
+      document.getElementById('userModal').classList.add('active');
+    }
+
+    function closeModal() {
+      document.getElementById('userModal').classList.remove('active');
+    }
+
+    async function submitUserForm(e) {
+      e.preventDefault();
+      const userId = document.getElementById('userId').value;
+      const isEdit = !!userId;
+
+      const data = {
+        username: document.getElementById('formUsername').value.trim(),
+        name: document.getElementById('formName').value.trim(),
+        role: document.getElementById('formRole').value,
+        active: document.getElementById('formActive').checked
+      };
+
+      const password = document.getElementById('formPassword').value;
+      if (password) {
+        if (password.length < 6) {
+          showAlert('Password must be at least 6 characters', 'error');
+          return;
+        }
+        data.password = password;
+      } else if (!isEdit) {
+        showAlert('Password is required for new users', 'error');
+        return;
+      }
+
+      try {
+        const url = isEdit ? `/ai-agent/api/admin/users/${userId}` : '/ai-agent/api/admin/users';
+        const method = isEdit ? 'PUT' : 'POST';
+
+        const resp = await fetch(url, {
+          method,
+          headers: { 'Content-Type': 'application/json' },
+          body: JSON.stringify(data)
+        });
+
+        const result = await resp.json();
+        if (result.success) {
+          showAlert(isEdit ? 'User updated successfully' : 'User created successfully');
+          closeModal();
+          loadUsers();
+        } else {
+          showAlert(result.error || 'Failed to save user', 'error');
+        }
+      } catch (err) {
+        showAlert('Failed to save user', 'error');
+      }
+    }
+
+    async function deleteUser(userId, username) {
+      if (!confirm(`Are you sure you want to delete user "${username}"?`)) return;
+
+      try {
+        const resp = await fetch(`/ai-agent/api/admin/users/${userId}`, {
+          method: 'DELETE'
+        });
+        const data = await resp.json();
+        if (data.success) {
+          showAlert('User deleted successfully');
+          loadUsers();
+        } else {
+          showAlert(data.error || 'Failed to delete user', 'error');
+        }
+      } catch (err) {
+        showAlert('Failed to delete user', 'error');
+      }
+    }
+
+    // Close modal on escape key
+    document.addEventListener('keydown', (e) => {
+      if (e.key === 'Escape') closeModal();
+    });
+
+    // Close modal on overlay click
+    document.getElementById('userModal').addEventListener('click', (e) => {
+      if (e.target.classList.contains('modal-overlay')) closeModal();
+    });
+  </script>
+</body>
+</html>

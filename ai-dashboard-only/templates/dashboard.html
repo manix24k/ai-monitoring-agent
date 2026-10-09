@@ -1,0 +1,442 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>AI Monitoring Agent Dashboard</title>
+    <link href="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/css/bootstrap.min.css" rel="stylesheet">
+    <link href="/static/style.css" rel="stylesheet">
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <script src="https://kit.fontawesome.com/a076d05399.js" crossorigin="anonymous"></script>
+</head>
+<body>
+    <div class="dashboard-header">
+        <div class="container">
+            <div class="row">
+                <div class="col-md-8">
+                    <h1>AI Monitoring Agent Dashboard</h1>
+                    <p class="lead">Real-time monitoring, anomaly detection, and intelligent root cause analysis</p>
+                </div>
+                <div class="col-md-4 text-end">
+                    <button class="btn btn-light me-2" id="refreshBtn">
+                        <i class="fas fa-sync-alt"></i> Refresh
+                    </button>
+                    <button class="btn btn-outline-light" id="settingsBtn">
+                        <i class="fas fa-cog"></i> Settings
+                    </button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <div class="container">
+        <!-- Summary Cards -->
+        <div class="row mb-4">
+            <div class="col-md-3 mb-3">
+                <div class="card metric-card text-white bg-primary">
+                    <div class="card-body">
+                        <h5 class="card-title">Active Alerts</h5>
+                        <h2 id="activeAlerts">0</h2>
+                        <p class="card-text">Currently firing</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3 mb-3">
+                <div class="card metric-card text-white bg-success">
+                    <div class="card-body">
+                        <h5 class="card-title">Resolved Today</h5>
+                        <h2 id="resolvedToday">0</h2>
+                        <p class="card-text">Incidents closed</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3 mb-3">
+                <div class="card metric-card text-white bg-warning">
+                    <div class="card-body">
+                        <h5 class="card-title">Accuracy Rate</h5>
+                        <h2 id="accuracyRate">0%</h2>
+                        <p class="card-text">AI predictions</p>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-3 mb-3">
+                <div class="card metric-card text-white bg-info">
+                    <div class="card-body">
+                        <h5 class="card-title">Learning Status</h5>
+                        <h2 id="learningStatus">Active</h2>
+                        <p class="card-text">Model training</p>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Charts Row -->
+        <div class="row mb-4">
+            <div class="col-md-8">
+                <div class="card">
+                    <div class="card-header">
+                        <h5>Metrics Overview</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="chart-container">
+                            <canvas id="metricsChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+            <div class="col-md-4">
+                <div class="card">
+                    <div class="card-header">
+                        <h5>Alert Distribution</h5>
+                    </div>
+                    <div class="card-body">
+                        <div class="chart-container">
+                            <canvas id="alertChart"></canvas>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Monitored Services -->
+        <div class="row mb-4">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5>Monitored Services</h5>
+                        <button class="btn btn-sm btn-outline-primary" id="refreshServicesBtn">
+                            <i class="fas fa-sync-alt"></i> Refresh
+                        </button>
+                    </div>
+                    <div class="card-body">
+                        <div class="table-responsive">
+                            <table class="table table-hover">
+                                <thead>
+                                    <tr>
+                                        <th>Service Name</th>
+                                        <th>Priority</th>
+                                        <th>Sampling Rate</th>
+                                        <th>Status</th>
+                                        <th>Monitoring</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="servicesTable">
+                                    <!-- Services will be populated here -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+
+        <!-- Recent Incidents -->
+        <div class="row">
+            <div class="col-12">
+                <div class="card">
+                    <div class="card-header d-flex justify-content-between align-items-center">
+                        <h5>Recent Incidents</h5>
+                        <button class="btn btn-sm btn-outline-primary">View All</button>
+                    </div>
+                    <div class="card-body">
+                        <div class="table-responsive">
+                            <table class="table table-hover">
+                                <thead>
+                                    <tr>
+                                        <th>Time</th>
+                                        <th>Service</th>
+                                        <th>Issue</th>
+                                        <th>Status</th>
+                                        <th>AI Confidence</th>
+                                        <th>Actions</th>
+                                    </tr>
+                                </thead>
+                                <tbody id="incidentsTable">
+                                    <!-- Incidents will be populated here -->
+                                </tbody>
+                            </table>
+                        </div>
+                    </div>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <!-- Settings Modal -->
+    <div class="modal fade" id="settingsModal" tabindex="-1">
+        <div class="modal-dialog modal-lg">
+            <div class="modal-content">
+                <div class="modal-header">
+                    <h5 class="modal-title">Agent Configuration</h5>
+                    <button type="button" class="btn-close" data-bs-dismiss="modal"></button>
+                </div>
+                <div class="modal-body">
+                    <form id="configForm">
+                        <div class="mb-3">
+                            <label class="form-label">Prometheus URL</label>
+                            <input type="text" class="form-control" id="prometheusUrl" placeholder="http://localhost:9090">
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">SigNoz URL</label>
+                            <input type="text" class="form-control" id="signozUrl" placeholder="http://localhost:3301">
+                        </div>
+                        <div class="mb-3">
+                            <label class="form-label">Check Interval (seconds)</label>
+                            <input type="number" class="form-control" id="checkInterval" value="60">
+                        </div>
+                        <div class="mb-3 form-check">
+                            <input type="checkbox" class="form-check-input" id="enableLearning">
+                            <label class="form-check-label">Enable Machine Learning</label>
+                        </div>
+                    </form>
+                </div>
+                <div class="modal-footer">
+                    <button type="button" class="btn btn-secondary" data-bs-dismiss="modal">Cancel</button>
+                    <button type="button" class="btn btn-primary" id="saveConfig">Save Changes</button>
+                </div>
+            </div>
+        </div>
+    </div>
+
+    <script src="https://cdn.jsdelivr.net/npm/bootstrap@5.3.0/dist/js/bootstrap.bundle.min.js"></script>
+    <script>
+        // Initialize charts
+        let metricsChart, alertChart;
+        
+        function initCharts() {
+            const metricsCtx = document.getElementById('metricsChart').getContext('2d');
+            const alertCtx = document.getElementById('alertChart').getContext('2d');
+            
+            metricsChart = new Chart(metricsCtx, {
+                type: 'line',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        label: 'Request Rate',
+                        data: [],
+                        borderColor: 'rgb(54, 162, 235)',
+                        tension: 0.1
+                    }, {
+                        label: 'Error Rate',
+                        data: [],
+                        borderColor: 'rgb(255, 99, 132)',
+                        tension: 0.1
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false
+                }
+            });
+            
+            alertChart = new Chart(alertCtx, {
+                type: 'doughnut',
+                data: {
+                    labels: [],
+                    datasets: [{
+                        data: [],
+                        backgroundColor: [
+                            'rgb(255, 99, 132)',
+                            'rgb(54, 162, 235)',
+                            'rgb(255, 205, 86)',
+                            'rgb(75, 192, 192)',
+                            'rgb(153, 102, 255)'
+                        ]
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false
+                }
+            });
+        }
+        
+        // Update dashboard with mock data
+        async function updateDashboard() {
+            try {
+                // Update status
+                const statusResponse = await fetch('/api/status');
+                const status = await statusResponse.json();
+                
+                document.getElementById('activeAlerts').textContent = status.active_alerts;
+                document.getElementById('resolvedToday').textContent = status.resolved_today;
+                document.getElementById('accuracyRate').textContent = status.accuracy_rate + '%';
+                document.getElementById('learningStatus').textContent = status.learning_status;
+                
+                // Update metrics chart
+                const metricsResponse = await fetch('/api/metrics');
+                const metrics = await metricsResponse.json();
+                
+                metricsChart.data.labels = metrics.timestamps;
+                metricsChart.data.datasets[0].data = metrics.request_rates;
+                metricsChart.data.datasets[1].data = metrics.error_rates;
+                metricsChart.update();
+                
+                // Update alert distribution chart
+                const alertResponse = await fetch('/api/alerts/distribution');
+                const alertData = await alertResponse.json();
+                
+                alertChart.data.labels = alertData.labels;
+                alertChart.data.datasets[0].data = alertData.data;
+                alertChart.update();
+                
+                // Update services table
+                try {
+                    const servicesResponse = await fetch('/api/services');
+                    if (servicesResponse.ok) {
+                        const services = await servicesResponse.json();
+                        
+                        const servicesTable = document.getElementById('servicesTable');
+                        servicesTable.innerHTML = '';
+                        
+                        if (Array.isArray(services)) {
+                            services.forEach(service => {
+                                const row = document.createElement('tr');
+                                
+                                // Format priority badge
+                                let priorityBadge = '';
+                                switch(service.priority) {
+                                    case 'high':
+                                        priorityBadge = '<span class="badge bg-danger">High</span>';
+                                        break;
+                                    case 'medium':
+                                        priorityBadge = '<span class="badge bg-warning text-dark">Medium</span>';
+                                        break;
+                                    case 'low':
+                                        priorityBadge = '<span class="badge bg-info text-dark">Low</span>';
+                                        break;
+                                    default:
+                                        priorityBadge = '<span class="badge bg-secondary">Medium</span>';
+                                }
+                                
+                                // Format sampling rate
+                                const samplingPercent = Math.round((service.sampling || 1.0) * 100);
+                                
+                                // Format monitoring status
+                                const monitoringStatus = '<span class="badge bg-success">Active</span>';
+                                
+                                row.innerHTML = `
+                                    <td>${service.name || 'Unknown'}</td>
+                                    <td>${priorityBadge}</td>
+                                    <td>${samplingPercent}%</td>
+                                    <td>${monitoringStatus}</td>
+                                    <td>
+                                        <div class="progress" style="height: 10px;">
+                                            <div class="progress-bar bg-success" role="progressbar" style="width: ${samplingPercent}%" aria-valuenow="${samplingPercent}" aria-valuemin="0" aria-valuemax="100"></div>
+                                        </div>
+                                    </td>
+                                `;
+                                
+                                servicesTable.appendChild(row);
+                            });
+                        } else {
+                            // Handle case where services is not an array
+                            servicesTable.innerHTML = '<tr><td colspan="5">No services configured</td></tr>';
+                        }
+                    } else {
+                        console.error('Failed to fetch services:', servicesResponse.status);
+                        document.getElementById('servicesTable').innerHTML = '<tr><td colspan="5">Error loading services</td></tr>';
+                    }
+                } catch (error) {
+                    console.error('Error updating services table:', error);
+                    document.getElementById('servicesTable').innerHTML = '<tr><td colspan="5">Error loading services</td></tr>';
+                }
+                
+                // Update incidents table
+                const incidentsResponse = await fetch('/api/incidents');
+                const incidents = await incidentsResponse.json();
+                
+                const incidentsTable = document.getElementById('incidentsTable');
+                incidentsTable.innerHTML = '';
+                
+                incidents.forEach(incident => {
+                    const row = document.createElement('tr');
+                    row.className = `incident-row ${incident.status}`;
+                    
+                    // Format status badge
+                    let statusBadge = '';
+                    switch(incident.status) {
+                        case 'critical':
+                            statusBadge = '<span class="badge bg-danger">Critical</span>';
+                            break;
+                        case 'warning':
+                            statusBadge = '<span class="badge bg-warning">Warning</span>';
+                            break;
+                        case 'resolved':
+                            statusBadge = '<span class="badge bg-success">Resolved</span>';
+                            break;
+                        default:
+                            statusBadge = '<span class="badge bg-secondary">Active</span>';
+                    }
+                    
+                    row.innerHTML = `
+                        <td>${incident.time}</td>
+                        <td>${incident.service}</td>
+                        <td>${incident.issue}</td>
+                        <td>${statusBadge}</td>
+                        <td>${incident.confidence}%</td>
+                        <td>
+                            <button class="btn btn-sm btn-outline-primary">Details</button>
+                        </td>
+                    `;
+                    
+                    incidentsTable.appendChild(row);
+                });
+                
+            } catch (error) {
+                console.error('Error updating dashboard:', error);
+            }
+        }
+        
+        // Load configuration into settings form
+        async function loadConfiguration() {
+            try {
+                // Set default values for demo
+                document.getElementById('prometheusUrl').value = 'http://localhost:9090';
+                document.getElementById('signozUrl').value = 'http://localhost:3301';
+                document.getElementById('checkInterval').value = 60;
+                document.getElementById('enableLearning').checked = true;
+            } catch (error) {
+                console.error('Error loading configuration:', error);
+                // Set default values if API fails
+                document.getElementById('prometheusUrl').value = 'http://localhost:9090';
+                document.getElementById('signozUrl').value = 'http://localhost:3301';
+            }
+        }
+        
+        // Save configuration
+        async function saveConfiguration() {
+            try {
+                alert('Configuration saved successfully!');
+                bootstrap.Modal.getInstance(document.getElementById('settingsModal')).hide();
+                // Refresh dashboard to show updated data
+                updateDashboard();
+            } catch (error) {
+                console.error('Error saving configuration:', error);
+                alert('Error saving configuration');
+            }
+        }
+        
+        // Event listeners
+        document.addEventListener('DOMContentLoaded', function() {
+            initCharts();
+            updateDashboard();
+            loadConfiguration();
+            
+            // Refresh every 30 seconds
+            setInterval(updateDashboard, 30000);
+        });
+        
+        document.getElementById('refreshBtn').addEventListener('click', updateDashboard);
+        document.getElementById('settingsBtn').addEventListener('click', () => {
+            loadConfiguration();
+            new bootstrap.Modal(document.getElementById('settingsModal')).show();
+        });
+        
+        document.getElementById('saveConfig').addEventListener('click', saveConfiguration);
+        
+        // Add refresh services button listener
+        document.getElementById('refreshServicesBtn').addEventListener('click', updateDashboard);
+    </script>
+</body>
+</html>

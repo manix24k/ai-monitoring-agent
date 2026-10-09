@@ -1,0 +1,79 @@
+apiVersion: apps/v1
+kind: Deployment
+metadata:
+  name: ai-dashboard-only
+  namespace: mercury
+  labels:
+    app: ai-dashboard-only
+spec:
+  replicas: 1
+  selector:
+    matchLabels:
+      app: ai-dashboard-only
+  template:
+    metadata:
+      labels:
+        app: ai-dashboard-only
+    spec:
+      containers:
+      - name: ai-dashboard-only
+        image: ai-dashboard-only:latest
+        ports:
+        - containerPort: 5001
+        resources:
+          requests:
+            memory: "256Mi"
+            cpu: "100m"
+          limits:
+            memory: "512Mi"
+            cpu: "250m"
+        livenessProbe:
+          httpGet:
+            path: /health
+            port: 5001
+          initialDelaySeconds: 30
+          periodSeconds: 30
+          timeoutSeconds: 10
+          failureThreshold: 3
+        readinessProbe:
+          httpGet:
+            path: /health
+            port: 5001
+          initialDelaySeconds: 10
+          periodSeconds: 15
+          timeoutSeconds: 5
+          failureThreshold: 3
+---
+apiVersion: v1
+kind: Service
+metadata:
+  name: ai-dashboard-only
+  namespace: mercury
+spec:
+  selector:
+    app: ai-dashboard-only
+  ports:
+  - protocol: TCP
+    port: 80
+    targetPort: 5001
+  type: ClusterIP
+---
+apiVersion: networking.k8s.io/v1
+kind: Ingress
+metadata:
+  name: ai-dashboard-only
+  namespace: mercury
+  annotations:
+    nginx.ingress.kubernetes.io/rewrite-target: /
+spec:
+  rules:
+  - host: mercury.fabmailers.in
+    http:
+      paths:
+      - path: /ai-agent
+        pathType: Prefix
+        backend:
+          service:
+            name: ai-dashboard-only
+            port:
+              number: 80

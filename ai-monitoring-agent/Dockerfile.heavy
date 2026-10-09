@@ -1,0 +1,39 @@
+FROM python:3.9-slim
+
+WORKDIR /app
+
+# Install system dependencies including curl and zstd for Ollama installation
+RUN apt-get update && apt-get install -y \
+    gcc \
+    curl \
+    zstd \
+    && rm -rf /var/lib/apt/lists/*
+
+# Install Ollama
+RUN curl -fsSL https://ollama.com/install.sh | sh && chmod +x /usr/local/bin/ollama
+
+# Copy requirements and install Python dependencies (use light version to avoid storage issues)
+COPY requirements-light.txt .
+RUN pip install --no-cache-dir -r requirements-light.txt
+
+# Copy application code
+COPY . .
+RUN find . -name "*.py" -exec chmod +x {} \;
+
+# Create models directory
+RUN mkdir -p /app/models
+
+# Create non-root user
+RUN adduser --disabled-password --gecos '' appuser
+RUN chown -R appuser:appuser /app
+USER appuser
+ENV PATH="$PATH:/usr/local/bin"
+ENV OLLAMA_MODELS="/app/models"
+
+# Expose web dashboard port and Ollama API port
+EXPOSE 5000
+EXPOSE 11434
+
+# Default command runs Ollama server and the integrated web dashboard
+# Model will be downloaded on first use to avoid build time storage issues
+CMD ["sh", "-c", "export PATH=$PATH:/usr/local/bin && ollama serve & sleep 5 && python web_dashboard.py"]

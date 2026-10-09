@@ -1,0 +1,430 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+  <title>Login — AI SRE Agent</title>
+  <link href="https://fonts.googleapis.com/css2?family=Space+Mono:wght@400;700&family=DM+Sans:wght@300;400;500;700&display=swap" rel="stylesheet" />
+  <style>
+    :root {
+      --void:#04070a;
+      --surface:rgba(6,14,26,0.82);
+      --rim:rgba(13,242,208,.18);
+      --rim2:rgba(13,242,208,.08);
+      --ink:#dde6ef; --ink2:#7a8fa3; --ink3:#3d5166;
+      --cyan:#0df2d0; --cyan-dim:rgba(13,242,208,.12);
+      --purple:#bc8cff; --pink:#ff4d94;
+      --red:#ff3d57; --red-dim:rgba(255,61,87,.12);
+      --mono:'Space Mono',monospace; --sans:'DM Sans',sans-serif;
+    }
+    * { box-sizing:border-box; margin:0; padding:0; }
+
+    html, body {
+      width:100%; min-height:100vh; overflow-x:hidden;
+      background:#030306;
+      font-family:var(--sans);
+      color:var(--ink);
+    }
+
+    /* ── SPACE BACKGROUND ── */
+    .space-bg {
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      z-index: 0; overflow: hidden;
+    }
+
+    .stars-layer {
+      position: absolute; width: 120%; height: 120%; left: -10%; top: -10%;
+      animation: spaceFloat 200s linear infinite;
+    }
+    .star {
+      position: absolute; background: white; border-radius: 50%;
+      animation: twinkle 2s ease-in-out infinite;
+    }
+    @keyframes spaceFloat {
+      0%   { transform: translate(0, 0); }
+      50%  { transform: translate(-20px, -30px); }
+      100% { transform: translate(0, 0); }
+    }
+    @keyframes twinkle {
+      0%, 100% { opacity: 0.3; }
+      50%       { opacity: 1; }
+    }
+
+    .nebula-layer {
+      position: absolute; width: 100%; height: 100%;
+      animation: nebulaDrift 60s ease-in-out infinite;
+    }
+    .nebula {
+      position: absolute; border-radius: 50%;
+      filter: blur(100px); opacity: 0.25;
+      animation: nebulaPulse 10s ease-in-out infinite;
+    }
+    .nebula-1 { width:600px; height:600px; background: radial-gradient(circle, rgba(123,44,191,0.25) 0%, transparent 70%); top:-10%; left:-15%; animation: nebulaMove1 100s ease-in-out infinite; }
+    .nebula-2 { width:500px; height:500px; background: radial-gradient(circle, rgba(0,102,255,0.2)  0%, transparent 70%); bottom:-5%; right:-10%; animation: nebulaMove2 120s ease-in-out infinite; animation-delay:-10s; }
+    .nebula-3 { width:400px; height:400px; background: radial-gradient(circle, rgba(0,245,212,0.15) 0%, transparent 70%); top:25%; left:35%; animation: nebulaMove3 110s ease-in-out infinite; animation-delay:-5s; }
+    .nebula-4 { width:350px; height:350px; background: radial-gradient(circle, rgba(255,0,110,0.12) 0%, transparent 70%); top:15%; right:25%; animation: nebulaMove4 130s ease-in-out infinite; animation-delay:-15s; }
+    @keyframes nebulaPulse  { 0%,100%{opacity:.4;transform:scale(1)}  50%{opacity:.7;transform:scale(1.1)} }
+    @keyframes nebulaMove1  { 0%,100%{transform:translate(0,0) rotate(0deg)}   33%{transform:translate(50px,-40px) rotate(120deg)}  66%{transform:translate(-30px,30px) rotate(240deg)} }
+    @keyframes nebulaMove2  { 0%,100%{transform:translate(0,0) rotate(0deg)}   33%{transform:translate(-40px,50px) rotate(120deg)}  66%{transform:translate(40px,-20px) rotate(240deg)} }
+    @keyframes nebulaMove3  { 0%,100%{transform:translate(0,0)}  50%{transform:translate(60px,-50px)} }
+    @keyframes nebulaMove4  { 0%,100%{transform:translate(0,0)}  50%{transform:translate(-50px,40px)} }
+
+    .planet-layer { position: absolute; width: 100%; height: 100%; }
+    .planet       { position: absolute; border-radius: 50%; }
+    .planet-1 { width:120px; height:120px; background:linear-gradient(135deg,#ff6b6b,#ee5a24,#f9ca24); top:10%; right:10%; animation:planetOrbit1 120s linear infinite; box-shadow:inset -15px -15px 30px rgba(0,0,0,.5); opacity:.6; }
+    .planet-2 { width:80px;  height:80px;  background:linear-gradient(135deg,#a855f7,#6366f1,#06b6d4); bottom:15%; left:3%; animation:planetOrbit2 150s linear infinite; animation-delay:-15s; box-shadow:inset -10px -10px 20px rgba(0,0,0,.5); opacity:.5; }
+    .planet-3 { width:50px;  height:50px;  background:linear-gradient(135deg,#10b981,#059669); top:55%; right:15%; animation:planetOrbit3 100s linear infinite; animation-delay:-8s; box-shadow:inset -8px -8px 15px rgba(0,0,0,.5); opacity:.5; }
+    .planet-4 { width:60px;  height:60px;  background:linear-gradient(135deg,#f59e0b,#d97706); bottom:30%; right:25%; animation:planetOrbit4 140s linear infinite; animation-delay:-20s; box-shadow:inset -8px -8px 15px rgba(0,0,0,.5); opacity:.5; }
+    @keyframes planetOrbit1 { 0%{transform:translate(0,0) rotate(0deg)}   25%{transform:translate(30px,-40px) rotate(90deg)}   50%{transform:translate(-20px,20px) rotate(180deg)}  75%{transform:translate(40px,30px) rotate(270deg)}  100%{transform:translate(0,0) rotate(360deg)} }
+    @keyframes planetOrbit2 { 0%{transform:translate(0,0) rotate(0deg)}   33%{transform:translate(-40px,30px) rotate(120deg)}  66%{transform:translate(30px,-40px) rotate(240deg)} 100%{transform:translate(0,0) rotate(360deg)} }
+    @keyframes planetOrbit3 { 0%{transform:translate(0,0)}  50%{transform:translate(25px,-35px)}  100%{transform:translate(0,0)} }
+    @keyframes planetOrbit4 { 0%{transform:translate(0,0) rotate(0deg)}  50%{transform:translate(-30px,20px) rotate(180deg)}  100%{transform:translate(0,0) rotate(360deg)} }
+
+    /* Neural network canvas */
+    .bg-canvas {
+      position: fixed; top: 0; left: 0; width: 100%; height: 100%;
+      z-index: 1; pointer-events: none;
+    }
+
+    /* subtle scanline overlay */
+    .space-bg::after {
+      content: '';
+      position: absolute; inset: 0;
+      background: repeating-linear-gradient(0deg, transparent, transparent 2px, rgba(0,0,0,.05) 2px, rgba(0,0,0,.05) 4px);
+      pointer-events: none;
+    }
+
+    /* ── PAGE LAYOUT ── */
+    .page {
+      position: relative; z-index: 2;
+      min-height: 100vh;
+      display: flex; flex-direction: column;
+      align-items: center; justify-content: center;
+      padding: 20px;
+    }
+
+    /* ── CARD ── */
+    .login-card {
+      width: 100%; max-width: 400px;
+      background: var(--surface);
+      border: 1px solid var(--rim);
+      border-radius: 18px;
+      padding: 40px 36px;
+      backdrop-filter: blur(24px);
+      -webkit-backdrop-filter: blur(24px);
+      box-shadow:
+        0 0 0 1px rgba(13,242,208,.04),
+        0 24px 64px rgba(0,0,0,.6),
+        0 0 80px rgba(13,242,208,.06),
+        inset 0 1px 0 rgba(255,255,255,.06);
+      animation: cardIn .5s cubic-bezier(.22,1,.36,1) both;
+    }
+    @keyframes cardIn {
+      from { opacity:0; transform:translateY(20px) scale(.97); }
+      to   { opacity:1; transform:none; }
+    }
+
+    /* glowing top border accent */
+    .login-card::before {
+      content: '';
+      position: absolute; top: 0; left: 20%; right: 20%;
+      height: 1px;
+      background: linear-gradient(90deg, transparent, var(--cyan), var(--purple), transparent);
+      border-radius: 2px; opacity: .7;
+    }
+    .login-card { position: relative; }
+
+    /* ── HEADER ── */
+    .login-header { text-align: center; margin-bottom: 32px; }
+
+    .login-logo {
+      display: inline-flex; align-items: center; gap: 8px;
+      font-family: var(--mono); font-size: 11px;
+      letter-spacing: .18em; text-transform: uppercase;
+      color: var(--cyan); margin-bottom: 14px;
+      padding: 5px 14px;
+      background: var(--cyan-dim);
+      border: 1px solid rgba(13,242,208,.2);
+      border-radius: 20px;
+    }
+    .logo-dot {
+      width: 6px; height: 6px; border-radius: 50%;
+      background: var(--cyan); box-shadow: 0 0 8px var(--cyan);
+      animation: pulse 2s ease-in-out infinite;
+    }
+    @keyframes pulse {
+      0%,100% { opacity:1; box-shadow:0 0 8px var(--cyan); }
+      50%      { opacity:.4; box-shadow:0 0 4px var(--cyan); }
+    }
+
+    .login-title    { font-size: 22px; font-weight: 600; color: var(--ink); letter-spacing: -.01em; }
+    .login-subtitle { font-size: 13px; color: var(--ink2); margin-top: 6px; }
+
+    /* ── FORM ── */
+    .form-group  { margin-bottom: 18px; }
+    .form-label  {
+      display: block; font-family: var(--mono); font-size: 10px;
+      text-transform: uppercase; letter-spacing: .1em;
+      color: var(--ink3); margin-bottom: 8px;
+    }
+    .form-input  {
+      width: 100%;
+      background: rgba(4,7,10,.7);
+      border: 1px solid rgba(255,255,255,.08);
+      border-radius: 10px; padding: 13px 16px;
+      font-size: 14px; color: var(--ink); font-family: var(--sans);
+      transition: border-color .2s, box-shadow .2s;
+    }
+    .form-input:focus {
+      outline: none;
+      border-color: rgba(13,242,208,.5);
+      box-shadow: 0 0 0 3px rgba(13,242,208,.1), 0 0 20px rgba(13,242,208,.08);
+    }
+    .form-input::placeholder { color: var(--ink3); }
+
+    /* ── BUTTON ── */
+    .btn-login {
+      width: 100%;
+      background: linear-gradient(135deg, #0df2d0 0%, #0ac4a8 50%, #09a891 100%);
+      border: none; border-radius: 10px;
+      padding: 14px 24px; font-size: 14px; font-weight: 700;
+      color: #04070a; cursor: pointer; margin-top: 6px;
+      letter-spacing: .02em;
+      transition: transform .15s, box-shadow .15s, filter .15s;
+      box-shadow: 0 4px 20px rgba(13,242,208,.25);
+    }
+    .btn-login:hover   { transform: translateY(-2px); box-shadow: 0 8px 32px rgba(13,242,208,.4); filter: brightness(1.06); }
+    .btn-login:active  { transform: translateY(0); filter: brightness(.97); }
+
+    /* ── ERROR ── */
+    .error-message {
+      background: var(--red-dim); border: 1px solid rgba(255,61,87,.3);
+      border-radius: 9px; padding: 11px 14px;
+      color: var(--red); font-size: 13px; margin-bottom: 18px;
+      display: flex; align-items: center; gap: 9px;
+    }
+    .error-icon {
+      width: 18px; height: 18px; background: var(--red); border-radius: 50%;
+      display: flex; align-items: center; justify-content: center;
+      color: #fff; font-size: 11px; font-weight: bold; flex-shrink: 0;
+    }
+
+    /* ── FOOTER ── */
+    .login-footer {
+      text-align: center; margin-top: 22px; padding-top: 20px;
+      border-top: 1px solid rgba(255,255,255,.05);
+    }
+    .login-footer-text { font-size: 10px; color: var(--ink3); font-family: var(--mono); letter-spacing: .08em; }
+    .login-footer-text span { color: rgba(13,242,208,.5); }
+
+    /* ── CORNER ACCENTS ── */
+    .corner { position: absolute; width: 14px; height: 14px; }
+    .corner-tl { top:-1px;    left:-1px;  border-top:2px solid var(--cyan);   border-left:2px solid var(--cyan);   border-radius:4px 0 0 0; }
+    .corner-tr { top:-1px;    right:-1px; border-top:2px solid var(--purple); border-right:2px solid var(--purple); border-radius:0 4px 0 0; }
+    .corner-bl { bottom:-1px; left:-1px;  border-bottom:2px solid var(--purple); border-left:2px solid var(--purple); border-radius:0 0 0 4px; }
+    .corner-br { bottom:-1px; right:-1px; border-bottom:2px solid var(--cyan); border-right:2px solid var(--cyan);   border-radius:0 0 4px 0; }
+  </style>
+</head>
+<body>
+
+<!-- Space background -->
+<div class="space-bg">
+  <div class="stars-layer" id="stars"></div>
+  <div class="nebula-layer">
+    <div class="nebula nebula-1"></div>
+    <div class="nebula nebula-2"></div>
+    <div class="nebula nebula-3"></div>
+    <div class="nebula nebula-4"></div>
+  </div>
+  <div class="planet-layer">
+    <div class="planet planet-1"></div>
+    <div class="planet planet-2"></div>
+    <div class="planet planet-3"></div>
+    <div class="planet planet-4"></div>
+  </div>
+</div>
+<canvas class="bg-canvas" id="bgCanvas"></canvas>
+
+<!-- Login content -->
+<div class="page">
+  <div class="login-card">
+    <div class="corner corner-tl"></div>
+    <div class="corner corner-tr"></div>
+    <div class="corner corner-bl"></div>
+    <div class="corner corner-br"></div>
+
+    <div class="login-header">
+      <div class="login-logo"><div class="logo-dot"></div>AI SRE Agent</div>
+      <div class="login-title">Welcome Back</div>
+      <div class="login-subtitle">Sign in to access the monitoring dashboard</div>
+    </div>
+
+    {% if error %}
+    <div class="error-message">
+      <div class="error-icon">!</div>
+      <span>{{ error }}</span>
+    </div>
+    {% endif %}
+
+    <form method="POST" action="{{ url_for('login_submit') }}">
+      <div class="form-group">
+        <label class="form-label" for="username">Username</label>
+        <input type="text" id="username" name="username" class="form-input"
+               placeholder="Enter your username" required autofocus />
+      </div>
+      <div class="form-group">
+        <label class="form-label" for="password">Password</label>
+        <input type="password" id="password" name="password" class="form-input"
+               placeholder="Enter your password" required />
+      </div>
+      <button type="submit" class="btn-login">Sign In →</button>
+    </form>
+
+    <div class="login-footer">
+      <div class="login-footer-text">AI Monitoring Control Plane &nbsp;·&nbsp; <span>jupiter / venus</span></div>
+    </div>
+  </div>
+</div>
+
+<script>
+  // ── Stars ──
+  const starsContainer = document.getElementById('stars');
+  for (let i = 0; i < 300; i++) {
+    const s = document.createElement('div');
+    s.className = 'star';
+    s.style.left   = Math.random() * 100 + '%';
+    s.style.top    = Math.random() * 100 + '%';
+    s.style.width  = (Math.random() * 3 + 1) + 'px';
+    s.style.height = s.style.width;
+    s.style.animationDelay    = (Math.random() * 2) + 's';
+    s.style.animationDuration = (Math.random() * 2 + 1) + 's';
+    starsContainer.appendChild(s);
+  }
+
+  // ── Anti-Gravity Neural Network ──
+  const canvas = document.getElementById('bgCanvas');
+  const ctx    = canvas.getContext('2d');
+  let nodes = [], mouseX = window.innerWidth / 2, mouseY = window.innerHeight / 2, time = 0;
+
+  function resize() { canvas.width = window.innerWidth; canvas.height = window.innerHeight; }
+
+  class Node {
+    constructor() {
+      this.x     = Math.random() * canvas.width;
+      this.y     = Math.random() * canvas.height;
+      this.vx    = (Math.random() - 0.5) * 0.15;
+      this.vy    = (Math.random() - 0.5) * 0.15;
+      this.size  = Math.random() * 2.5 + 0.8;
+      this.baseX = this.x;
+      this.baseY = this.y;
+      const colors = ['#00f5d4', '#0066ff', '#7b2cbf', '#ff006e', '#00d4ff'];
+      this.color = colors[Math.floor(Math.random() * colors.length)];
+      this.angle = Math.random() * Math.PI * 2;
+      this.speed = Math.random() * 0.008 + 0.005;
+    }
+
+    update() {
+      const dx = mouseX - this.x, dy = mouseY - this.y;
+      const distance = Math.sqrt(dx * dx + dy * dy);
+      if (distance < 250 && distance > 0) {
+        const force = (250 - distance) / 250 * 0.4;
+        const angle = Math.atan2(dy, dx);
+        this.vx += Math.cos(angle) * force * 0.5;
+        this.vy += Math.sin(angle) * force * 0.5;
+        if (distance < 80) {
+          this.angle += 0.08;
+          this.vx += Math.cos(this.angle) * force * 0.2;
+          this.vy += Math.sin(this.angle) * force * 0.2;
+        }
+      }
+      this.vx += Math.cos(time * this.speed + this.angle) * 0.015;
+      this.vy += Math.sin(time * this.speed + this.angle) * 0.015;
+      this.x  += this.vx;
+      this.y  += this.vy;
+      this.vx *= 0.96;
+      this.vy *= 0.96;
+      if (this.x < -50)               this.x = canvas.width + 50;
+      if (this.x > canvas.width + 50)  this.x = -50;
+      if (this.y < -50)               this.y = canvas.height + 50;
+      if (this.y > canvas.height + 50) this.y = -50;
+      if (distance > 500) {
+        this.vx += (this.baseX - this.x) * 0.0005;
+        this.vy += (this.baseY - this.y) * 0.0005;
+      }
+    }
+
+    draw() {
+      const g = ctx.createRadialGradient(this.x, this.y, 0, this.x, this.y, this.size * 4);
+      g.addColorStop(0, this.color + '80');
+      g.addColorStop(0.5, this.color + '30');
+      g.addColorStop(1, 'transparent');
+      ctx.fillStyle  = g;
+      ctx.globalAlpha = 0.4;
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, this.size * 4, 0, Math.PI * 2);
+      ctx.fill();
+      ctx.globalAlpha = 0.7;
+      ctx.fillStyle   = this.color;
+      ctx.beginPath();
+      ctx.arc(this.x, this.y, this.size * 0.8, 0, Math.PI * 2);
+      ctx.fill();
+    }
+  }
+
+  function init() {
+    nodes = [];
+    const count = Math.floor((canvas.width * canvas.height) / 8000);
+    for (let i = 0; i < count; i++) nodes.push(new Node());
+  }
+
+  function animate() {
+    time += 0.016;
+    ctx.clearRect(0, 0, canvas.width, canvas.height);
+    nodes.forEach(n => { n.update(); n.draw(); });
+
+    // Connections
+    for (let i = 0; i < nodes.length; i++) {
+      for (let j = i + 1; j < nodes.length; j++) {
+        const dx = nodes[i].x - nodes[j].x, dy = nodes[i].y - nodes[j].y;
+        const dist = Math.sqrt(dx * dx + dy * dy);
+        if (dist < 120) {
+          ctx.globalAlpha = 1;
+          ctx.strokeStyle = `rgba(0, 245, 212, ${(1 - dist / 120) * 0.12})`;
+          ctx.lineWidth   = 0.4;
+          ctx.beginPath();
+          ctx.moveTo(nodes[i].x, nodes[i].y);
+          ctx.lineTo(nodes[j].x, nodes[j].y);
+          ctx.stroke();
+        }
+      }
+    }
+
+    // Data stream pulses
+    for (let i = 0; i < 15; i++) {
+      const a = nodes[Math.floor(Math.random() * nodes.length)];
+      const b = nodes[Math.floor(Math.random() * nodes.length)];
+      const dx = b.x - a.x, dy = b.y - a.y;
+      if (Math.sqrt(dx * dx + dy * dy) < 150) {
+        const t = (Math.sin(time * 1.2 + i) + 1) / 2;
+        ctx.globalAlpha = 0.6;
+        ctx.fillStyle   = '#00f5d4';
+        ctx.beginPath();
+        ctx.arc(a.x + dx * t, a.y + dy * t, 1.8, 0, Math.PI * 2);
+        ctx.fill();
+        ctx.globalAlpha = 0.25;
+        ctx.beginPath();
+        ctx.arc(a.x + dx * (t - 0.1), a.y + dy * (t - 0.1), 1, 0, Math.PI * 2);
+        ctx.fill();
+      }
+    }
+
+    requestAnimationFrame(animate);
+  }
+
+  window.addEventListener('mousemove', e => { mouseX = e.clientX; mouseY = e.clientY; });
+  window.addEventListener('resize',    () => { resize(); init(); });
+  resize(); init(); animate();
+</script>
+
+</body>
+</html>

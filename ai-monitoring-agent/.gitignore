@@ -1,0 +1,15 @@
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+.Python
+venv/
+ai-agent-env/
+.env
+*.log
+*.pid
+*.egg-info/
+dist/
+build/
+.DS_Store
+models/

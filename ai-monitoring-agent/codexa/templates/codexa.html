@@ -1,0 +1,2314 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>CodeXA - Autonomous Code Fix Engine</title>
+    <script src="https://cdn.jsdelivr.net/npm/chart.js"></script>
+    <link href="https://fonts.googleapis.com/css2?family=JetBrains+Mono:wght@400;500;600;700&family=Inter:wght@300;400;500;600;700&display=swap" rel="stylesheet">
+    <style>
+        :root {
+            --cxa-void: #030508;
+            --cxa-deep: #0a0f14;
+            --cxa-surface: #111820;
+            --cxa-surface-light: #1a222d;
+            --cxa-border: #2a3441;
+            --cxa-text: #e4e8ed;
+            --cxa-text-muted: #8892a0;
+            --cxa-neon-blue: #00d4ff;
+            --cxa-neon-purple: #a855f7;
+            --cxa-neon-green: #00ff88;
+            --cxa-neon-red: #ff3366;
+            --cxa-neon-yellow: #ffd700;
+            --cxa-gradient: linear-gradient(135deg, #00d4ff 0%, #a855f7 100%);
+            --cxa-gradient-green: linear-gradient(135deg, #00ff88 0%, #00d4ff 100%);
+            --cxa-glow-blue: 0 0 20px rgba(0, 212, 255, 0.3);
+            --cxa-glow-purple: 0 0 20px rgba(168, 85, 247, 0.3);
+            --cxa-glow-green: 0 0 20px rgba(0, 255, 136, 0.3);
+        }
+
+        * {
+            margin: 0;
+            padding: 0;
+            box-sizing: border-box;
+        }
+
+        body {
+            font-family: 'Inter', -apple-system, BlinkMacSystemFont, sans-serif;
+            background: var(--cxa-void);
+            color: var(--cxa-text);
+            min-height: 100vh;
+            overflow-x: hidden;
+        }
+
+        /* Animated background grid */
+        body::before {
+            content: '';
+            position: fixed;
+            top: 0;
+            left: 0;
+            width: 100%;
+            height: 100%;
+            background-image:
+                linear-gradient(rgba(0, 212, 255, 0.03) 1px, transparent 1px),
+                linear-gradient(90deg, rgba(0, 212, 255, 0.03) 1px, transparent 1px);
+            background-size: 50px 50px;
+            pointer-events: none;
+            z-index: 0;
+        }
+
+        /* Header */
+        .header {
+            background: var(--cxa-deep);
+            border-bottom: 1px solid var(--cxa-border);
+            padding: 1rem 2rem;
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            position: sticky;
+            top: 0;
+            z-index: 100;
+            backdrop-filter: blur(10px);
+        }
+
+        .logo {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .logo-icon {
+            width: 48px;
+            height: 48px;
+            background: var(--cxa-gradient);
+            border-radius: 12px;
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            font-size: 24px;
+            font-weight: 700;
+            box-shadow: var(--cxa-glow-blue);
+        }
+
+        .logo-text h1 {
+            font-size: 1.5rem;
+            font-weight: 700;
+            background: var(--cxa-gradient);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            letter-spacing: 2px;
+        }
+
+        .logo-text p {
+            font-size: 0.75rem;
+            color: var(--cxa-text-muted);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+        }
+
+        .header-actions {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .mode-toggle {
+            display: flex;
+            background: var(--cxa-surface);
+            border-radius: 8px;
+            padding: 4px;
+            border: 1px solid var(--cxa-border);
+        }
+
+        .mode-btn {
+            padding: 8px 16px;
+            border-radius: 6px;
+            font-size: 0.875rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.3s ease;
+            text-decoration: none;
+            color: var(--cxa-text-muted);
+            border: none;
+            background: transparent;
+        }
+
+        .mode-btn:hover {
+            color: var(--cxa-text);
+        }
+
+        .mode-btn.active {
+            background: var(--cxa-gradient);
+            color: var(--cxa-void);
+        }
+
+        .model-selector {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .model-selector label {
+            font-size: 0.75rem;
+            color: var(--cxa-text-muted);
+            text-transform: uppercase;
+        }
+
+        .model-selector select {
+            background: var(--cxa-surface);
+            border: 1px solid var(--cxa-border);
+            color: var(--cxa-text);
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 0.875rem;
+            cursor: pointer;
+            min-width: 200px;
+        }
+
+        .window-selector {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .window-selector label {
+            font-size: 0.75rem;
+            color: var(--cxa-text-muted);
+            text-transform: uppercase;
+        }
+
+        .window-selector select {
+            background: var(--cxa-surface);
+            border: 1px solid var(--cxa-border);
+            color: var(--cxa-text);
+            padding: 8px 12px;
+            border-radius: 6px;
+            font-size: 0.875rem;
+            cursor: pointer;
+            min-width: 120px;
+        }
+
+        .model-selector select:focus {
+            outline: none;
+            border-color: var(--cxa-neon-blue);
+            box-shadow: var(--cxa-glow-blue);
+        }
+
+        /* Main container */
+        .container {
+            max-width: 100%;
+            margin: 0;
+            padding: 1.5rem;
+            position: relative;
+            z-index: 1;
+        }
+
+        /* Stats cards */
+        .stats-grid {
+            display: grid;
+            grid-template-columns: repeat(4, 1fr);
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .stat-card {
+            background: var(--cxa-surface);
+            border: 1px solid var(--cxa-border);
+            border-radius: 16px;
+            padding: 1.5rem;
+            position: relative;
+            overflow: hidden;
+            transition: all 0.3s ease;
+        }
+
+        .stat-card::before {
+            content: '';
+            position: absolute;
+            top: 0;
+            left: 0;
+            right: 0;
+            height: 3px;
+            background: var(--cxa-gradient);
+        }
+
+        .stat-card:hover {
+            transform: translateY(-2px);
+            box-shadow: var(--cxa-glow-blue);
+        }
+
+        .stat-card.purple::before {
+            background: var(--cxa-neon-purple);
+        }
+
+        .stat-card.green::before {
+            background: var(--cxa-neon-green);
+        }
+
+        .stat-card.yellow::before {
+            background: var(--cxa-neon-yellow);
+        }
+
+        .stat-label {
+            font-size: 0.75rem;
+            color: var(--cxa-text-muted);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            margin-bottom: 0.5rem;
+        }
+
+        .stat-value {
+            font-size: 2.5rem;
+            font-weight: 700;
+            background: var(--cxa-gradient);
+            -webkit-background-clip: text;
+            -webkit-text-fill-color: transparent;
+            line-height: 1;
+        }
+
+        .stat-card.purple .stat-value {
+            background: var(--cxa-neon-purple);
+            -webkit-background-clip: text;
+        }
+
+        .stat-card.green .stat-value {
+            background: var(--cxa-gradient-green);
+            -webkit-background-clip: text;
+        }
+
+        .stat-card.yellow .stat-value {
+            background: var(--cxa-neon-yellow);
+            -webkit-background-clip: text;
+        }
+
+        .stat-meta {
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+            margin-top: 0.75rem;
+            font-size: 0.875rem;
+            color: var(--cxa-text-muted);
+        }
+
+        .stat-meta .indicator {
+            width: 8px;
+            height: 8px;
+            border-radius: 50%;
+            animation: pulse 2s infinite;
+        }
+
+        .stat-meta .indicator.green {
+            background: var(--cxa-neon-green);
+            box-shadow: 0 0 10px var(--cxa-neon-green);
+        }
+
+        .stat-meta .indicator.blue {
+            background: var(--cxa-neon-blue);
+            box-shadow: 0 0 10px var(--cxa-neon-blue);
+        }
+
+        @keyframes pulse {
+            0%, 100% { opacity: 1; }
+            50% { opacity: 0.5; }
+        }
+
+        /* Charts row */
+        .charts-row {
+            display: grid;
+            grid-template-columns: 2fr 1fr;
+            gap: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .chart-card {
+            background: var(--cxa-surface);
+            border: 1px solid var(--cxa-border);
+            border-radius: 16px;
+            padding: 1.5rem;
+        }
+
+        .chart-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1rem;
+        }
+
+        .chart-title {
+            font-size: 1rem;
+            font-weight: 600;
+            color: var(--cxa-text);
+        }
+
+        .chart-container {
+            height: 200px;
+            position: relative;
+        }
+
+        /* Pending fixes section */
+        .section {
+            background: var(--cxa-surface);
+            border: 1px solid var(--cxa-border);
+            border-radius: 16px;
+            padding: 1.5rem;
+            margin-bottom: 2rem;
+        }
+
+        .section-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: center;
+            margin-bottom: 1.5rem;
+        }
+
+        .section-title {
+            font-size: 1rem;
+            font-weight: 600;
+            display: flex;
+            align-items: center;
+            gap: 0.5rem;
+        }
+
+        .section-title .count {
+            background: var(--cxa-gradient);
+            color: var(--cxa-void);
+            font-size: 0.75rem;
+            padding: 2px 8px;
+            border-radius: 12px;
+        }
+
+        .btn {
+            padding: 8px 16px;
+            border-radius: 8px;
+            font-size: 0.875rem;
+            font-weight: 500;
+            cursor: pointer;
+            transition: all 0.25s ease;
+            border: 1px solid rgba(255,255,255,.1);
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            position: relative;
+            overflow: hidden;
+        }
+        /* Cursor-following neon glow spot */
+        .btn::after {
+            content: '';
+            position: absolute;
+            width: 100px; height: 100px;
+            border-radius: 50%;
+            background: radial-gradient(circle, rgba(var(--_nr,0),var(--_ng,212),var(--_nb,255),.38) 0%, transparent 68%);
+            left: var(--mx,50%); top: var(--my,50%);
+            transform: translate(-50%,-50%);
+            pointer-events: none;
+            opacity: 0;
+            transition: opacity .2s;
+        }
+        .btn:hover::after { opacity: 1; }
+
+        .btn-primary {
+            background: var(--cxa-gradient);
+            color: var(--cxa-void);
+            border-color: rgba(0,212,255,.5);
+            --_nr:0; --_ng:212; --_nb:255;
+        }
+        .btn-primary:hover {
+            box-shadow: 0 0 18px rgba(0,212,255,.5);
+            transform: translateY(-1px);
+        }
+
+        .btn-secondary {
+            background: var(--cxa-surface-light);
+            color: var(--cxa-text);
+            border: 1px solid var(--cxa-border);
+            --_nr:168; --_ng:85; --_nb:247;
+        }
+        .btn-secondary:hover {
+            border-color: rgba(168,85,247,.6);
+            color: #a855f7;
+            box-shadow: 0 0 12px rgba(168,85,247,.3);
+        }
+
+        .btn-success {
+            background: transparent;
+            color: var(--cxa-neon-green);
+            border: 1px solid rgba(0,255,136,.5);
+            --_nr:0; --_ng:255; --_nb:136;
+        }
+        .btn-success:hover {
+            background: rgba(0,255,136,.12);
+            box-shadow: 0 0 14px rgba(0,255,136,.45);
+        }
+
+        .btn-danger {
+            background: transparent;
+            color: var(--cxa-neon-red);
+            border: 1px solid rgba(255,51,102,.45);
+            --_nr:255; --_ng:51; --_nb:102;
+        }
+        .btn-danger:hover {
+            background: rgba(255,51,102,.1);
+            box-shadow: 0 0 12px rgba(255,51,102,.4);
+        }
+
+        /* Status filter buttons — each its own neon color */
+        .btn-success.status-filter-btn {
+            background: transparent;
+            color: #00ff88;
+            border: 1px solid rgba(0,255,136,.45);
+        }
+        .status-filter-btn[data-status=""]       { --_nr:0;   --_ng:212; --_nb:255; border-color:rgba(0,212,255,.4);   color:#00d4ff; }
+        .status-filter-btn[data-status="pending"]{ --_nr:77;  --_ng:159; --_nb:255; border-color:rgba(77,159,255,.4);  color:#4d9fff; }
+        .status-filter-btn[data-status="fix_ready"]{ --_nr:0; --_ng:255; --_nb:136; border-color:rgba(0,255,136,.4);   color:#00ff88; }
+        .status-filter-btn[data-status="failed"] { --_nr:255; --_ng:51;  --_nb:102; border-color:rgba(255,51,102,.4);  color:#ff3366; }
+        .status-filter-btn[data-status="pr_created"]{ --_nr:168;--_ng:85;--_nb:247;border-color:rgba(168,85,247,.4);  color:#a855f7; }
+        /* Refresh filter button (no data-status) — amber */
+        .btn-secondary:not([data-status]).status-filter-btn,
+        .btn-secondary[onclick="refreshIssues()"] { --_nr:227; --_ng:179; --_nb:65; border-color:rgba(227,179,65,.4); color:#e3b341; }
+        /* Active state uses the button's own neon color as glow */
+        .status-filter-btn.active {
+            background: rgba(var(--_nr,0),var(--_ng,212),var(--_nb,255),.18) !important;
+            box-shadow: 0 0 14px rgba(var(--_nr,0),var(--_ng,212),var(--_nb,255),.45);
+        }
+        .status-filter-btn:hover {
+            background: rgba(var(--_nr,0),var(--_ng,212),var(--_nb,255),.1);
+            box-shadow: 0 0 10px rgba(var(--_nr,0),var(--_ng,212),var(--_nb,255),.35);
+            transform: translateY(-1px);
+        }
+
+        /* Issue cards */
+        .issue-list {
+            display: flex;
+            flex-direction: column;
+            gap: 1rem;
+            max-height: 62vh;
+            overflow-y: auto;
+            padding-right: 0.25rem;
+        }
+
+        .issue-card {
+            background: var(--cxa-deep);
+            border: 1px solid var(--cxa-border);
+            border-radius: 12px;
+            padding: 1.5rem;
+            transition: all 0.3s ease;
+        }
+
+        .issue-card:hover {
+            border-color: var(--cxa-neon-blue);
+        }
+
+        .issue-header {
+            display: flex;
+            justify-content: space-between;
+            align-items: flex-start;
+            margin-bottom: 1rem;
+        }
+
+        .issue-service {
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+        }
+
+        .issue-service .indicator {
+            width: 12px;
+            height: 12px;
+            border-radius: 50%;
+            background: var(--cxa-neon-blue);
+            box-shadow: 0 0 10px var(--cxa-neon-blue);
+        }
+
+        .issue-service .indicator.analyzing {
+            background: var(--cxa-neon-purple);
+            box-shadow: 0 0 10px var(--cxa-neon-purple);
+            animation: pulse 1s infinite;
+        }
+
+        .issue-service h3 {
+            font-size: 1rem;
+            font-weight: 600;
+        }
+
+        .issue-service .namespace {
+            font-size: 0.875rem;
+            color: var(--cxa-text-muted);
+        }
+
+        .issue-badge {
+            background: var(--cxa-neon-red);
+            color: white;
+            padding: 4px 12px;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            font-family: 'JetBrains Mono', monospace;
+        }
+
+        .issue-details {
+            margin-bottom: 1rem;
+        }
+
+        .issue-location {
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.875rem;
+            color: var(--cxa-neon-blue);
+            margin-bottom: 0.25rem;
+        }
+
+        .issue-description {
+            font-size: 0.875rem;
+            color: var(--cxa-text-muted);
+        }
+
+        .issue-meta {
+            display: flex;
+            gap: 1.5rem;
+            font-size: 0.875rem;
+            color: var(--cxa-text-muted);
+            margin-bottom: 1rem;
+        }
+
+        .issue-meta strong {
+            color: var(--cxa-neon-green);
+        }
+
+        /* Diff preview */
+        .diff-preview {
+            background: var(--cxa-void);
+            border: 1px solid var(--cxa-border);
+            border-radius: 8px;
+            padding: 1rem;
+            margin-bottom: 1rem;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 0.8rem;
+            overflow-x: auto;
+        }
+
+        .diff-line {
+            padding: 2px 0;
+        }
+
+        .diff-line.removed {
+            background: rgba(255, 51, 102, 0.2);
+            color: var(--cxa-neon-red);
+        }
+
+        .diff-line.added {
+            background: rgba(0, 255, 136, 0.2);
+            color: var(--cxa-neon-green);
+        }
+
+        .issue-actions {
+            display: flex;
+            gap: 0.75rem;
+        }
+
+        /* PR History Table */
+        .table-container {
+            overflow-x: auto;
+        }
+
+        .modal-bg {
+            position: fixed;
+            inset: 0;
+            background: rgba(3, 5, 8, 0.82);
+            display: none;
+            align-items: center;
+            justify-content: center;
+            z-index: 1200;
+            padding: 1rem;
+        }
+
+        .modal-bg.show {
+            display: flex;
+        }
+
+        .modal-card {
+            width: min(980px, 96vw);
+            max-height: 88vh;
+            overflow: auto;
+            background: var(--cxa-surface);
+            border: 1px solid var(--cxa-border);
+            border-radius: 14px;
+            padding: 1rem;
+        }
+
+        .modal-head {
+            display: flex;
+            align-items: center;
+            justify-content: space-between;
+            margin-bottom: 0.75rem;
+            border-bottom: 1px solid var(--cxa-border);
+            padding-bottom: 0.5rem;
+        }
+
+        .report-grid {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 0.85rem;
+        }
+        .report-grid .report-box.full-width {
+            grid-column: 1 / -1;
+        }
+        .report-charts-row {
+            display: flex;
+            gap: 1rem;
+            margin-bottom: 0.85rem;
+        }
+        .report-chart-box {
+            flex: 1;
+            border: 1px solid var(--cxa-border);
+            border-radius: 10px;
+            padding: 0.75rem;
+            background: #0f151d;
+        }
+        .report-chart-box h4 {
+            font-size: 0.85rem;
+            margin-bottom: 0.6rem;
+            color: var(--cxa-neon-blue);
+            text-transform: uppercase;
+        }
+        .rating-bar-wrap { display:flex; align-items:center; gap:0.6rem; margin-top:0.4rem; }
+        .rating-bar { flex:1; height:10px; background:#1a2030; border-radius:6px; overflow:hidden; }
+        .rating-fill { height:100%; border-radius:6px; transition: width .5s; }
+        .rating-label { font-size:1.1rem; font-weight:700; min-width:38px; text-align:right; }
+
+        .report-box {
+            border: 1px solid var(--cxa-border);
+            border-radius: 10px;
+            padding: 0.75rem;
+            background: #0f151d;
+        }
+
+        .report-box h4 {
+            font-size: 0.85rem;
+            margin-bottom: 0.45rem;
+            color: var(--cxa-neon-blue);
+            text-transform: uppercase;
+        }
+
+        .report-pre {
+            margin: 0;
+            white-space: pre-wrap;
+            word-break: break-word;
+            font-family: 'JetBrains Mono', monospace;
+            font-size: 12px;
+            line-height: 1.45;
+            color: var(--cxa-text);
+        }
+
+        .history-list {
+            max-height: 280px;
+            overflow: auto;
+            border: 1px solid var(--cxa-border);
+            border-radius: 10px;
+        }
+
+        table {
+            width: 100%;
+            border-collapse: collapse;
+        }
+
+        th {
+            text-align: left;
+            padding: 1rem;
+            font-size: 0.75rem;
+            color: var(--cxa-text-muted);
+            text-transform: uppercase;
+            letter-spacing: 1px;
+            border-bottom: 1px solid var(--cxa-border);
+        }
+
+        td {
+            padding: 1rem;
+            font-size: 0.875rem;
+            border-bottom: 1px solid var(--cxa-border);
+        }
+
+        tr:hover td {
+            background: var(--cxa-deep);
+        }
+
+        .status-badge {
+            display: inline-flex;
+            align-items: center;
+            gap: 0.5rem;
+            padding: 4px 12px;
+            border-radius: 6px;
+            font-size: 0.75rem;
+            font-weight: 500;
+        }
+
+        .status-badge.merged {
+            background: rgba(0, 255, 136, 0.2);
+            color: var(--cxa-neon-green);
+        }
+
+        .status-badge.open {
+            background: rgba(0, 212, 255, 0.2);
+            color: var(--cxa-neon-blue);
+        }
+
+        .status-badge.closed {
+            background: rgba(255, 51, 102, 0.2);
+            color: var(--cxa-neon-red);
+        }
+
+        .pr-link {
+            color: var(--cxa-neon-blue);
+            text-decoration: none;
+        }
+
+        .pr-link:hover {
+            text-decoration: underline;
+        }
+
+        /* Bottom panels */
+        .panels-row {
+            display: grid;
+            grid-template-columns: 1fr 1fr;
+            gap: 1.5rem;
+        }
+
+        .panel {
+            background: var(--cxa-surface);
+            border: 1px solid var(--cxa-border);
+            border-radius: 16px;
+            padding: 1.5rem;
+        }
+
+        .panel-title {
+            font-size: 1rem;
+            font-weight: 600;
+            margin-bottom: 1rem;
+        }
+
+        .llm-stats {
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+
+        .llm-stat-row {
+            display: flex;
+            justify-content: space-between;
+            padding: 0.5rem 0;
+            border-bottom: 1px solid var(--cxa-border);
+        }
+
+        .llm-stat-row:last-child {
+            border-bottom: none;
+        }
+
+        .llm-stat-label {
+            color: var(--cxa-text-muted);
+        }
+
+        .llm-stat-value {
+            font-weight: 600;
+            color: var(--cxa-neon-blue);
+        }
+
+        /* Type distribution */
+        .type-list {
+            display: flex;
+            flex-direction: column;
+            gap: 0.75rem;
+        }
+
+        .type-item {
+            display: flex;
+            align-items: center;
+            gap: 1rem;
+        }
+
+        .type-bar {
+            flex: 1;
+            height: 24px;
+            background: var(--cxa-deep);
+            border-radius: 4px;
+            overflow: hidden;
+            position: relative;
+        }
+
+        .type-bar-fill {
+            height: 100%;
+            background: var(--cxa-gradient);
+            border-radius: 4px;
+            transition: width 0.5s ease;
+        }
+
+        .type-name {
+            min-width: 160px;
+            font-size: 0.875rem;
+        }
+
+        .type-percent {
+            min-width: 50px;
+            text-align: right;
+            font-weight: 600;
+            color: var(--cxa-neon-blue);
+        }
+
+        /* Loading state */
+        .loading {
+            display: flex;
+            align-items: center;
+            justify-content: center;
+            padding: 3rem;
+            color: var(--cxa-text-muted);
+        }
+
+        .spinner {
+            width: 24px;
+            height: 24px;
+            border: 2px solid var(--cxa-border);
+            border-top-color: var(--cxa-neon-blue);
+            border-radius: 50%;
+            animation: spin 1s linear infinite;
+            margin-right: 0.75rem;
+        }
+
+        @keyframes spin {
+            to { transform: rotate(360deg); }
+        }
+
+        /* Toast notifications */
+        .toast-container {
+            position: fixed;
+            top: 80px;
+            right: 20px;
+            z-index: 1000;
+            display: flex;
+            flex-direction: column;
+            gap: 0.5rem;
+        }
+
+        .toast {
+            background: var(--cxa-surface);
+            border: 1px solid var(--cxa-border);
+            border-radius: 8px;
+            padding: 1rem 1.5rem;
+            display: flex;
+            align-items: center;
+            gap: 0.75rem;
+            box-shadow: 0 10px 40px rgba(0, 0, 0, 0.3);
+            animation: slideIn 0.3s ease;
+        }
+
+        .toast.success {
+            border-color: var(--cxa-neon-green);
+        }
+
+        .toast.error {
+            border-color: var(--cxa-neon-red);
+        }
+
+        @keyframes slideIn {
+            from {
+                transform: translateX(100%);
+                opacity: 0;
+            }
+            to {
+                transform: translateX(0);
+                opacity: 1;
+            }
+        }
+
+        /* Empty state */
+        .empty-state {
+            text-align: center;
+            padding: 3rem;
+            color: var(--cxa-text-muted);
+        }
+
+        .empty-state h3 {
+            margin-bottom: 0.5rem;
+        }
+
+        /* Responsive */
+        @media (max-width: 1200px) {
+            .stats-grid {
+                grid-template-columns: repeat(2, 1fr);
+            }
+
+            .charts-row {
+                grid-template-columns: 1fr;
+            }
+
+            .panels-row {
+                grid-template-columns: 1fr;
+            }
+        }
+
+        @media (max-width: 768px) {
+            .header {
+                flex-direction: column;
+                gap: 1rem;
+            }
+
+            .stats-grid {
+                grid-template-columns: 1fr;
+            }
+
+            .issue-header {
+                flex-direction: column;
+                gap: 0.75rem;
+            }
+
+            .issue-actions {
+                flex-wrap: wrap;
+            }
+
+            .model-selector {
+                flex-direction: column;
+                align-items: flex-start;
+            }
+        }
+    </style>
+</head>
+<body>
+    <header class="header">
+        <div class="logo">
+            <div class="logo-icon">CX</div>
+            <div class="logo-text">
+                <h1>CODEXA</h1>
+                <p>Autonomous Code Fix Engine</p>
+            </div>
+        </div>
+
+        <div class="header-actions">
+            <div class="model-selector">
+                <label>LLM Model:</label>
+                <select id="modelSelect" onchange="changeModel(this.value)">
+                    <option value="">Loading models...</option>
+                </select>
+            </div>
+
+            <div class="window-selector">
+                <label>Issue Window:</label>
+                <select id="issueWindow" onchange="onWindowChange()">
+                    <option value="5">5m</option>
+                    <option value="15">15m</option>
+                    <option value="30">30m</option>
+                    <option value="60" selected>1h</option>
+                    <option value="180">3h</option>
+                    <option value="360">6h</option>
+                    <option value="720">12h</option>
+                    <option value="1440">24h</option>
+                </select>
+            </div>
+
+            <button class="btn btn-primary" id="scanBtn" onclick="scanForIssues()" style="margin-right:12px">
+                <span id="scanBtnText">Scan for Issues</span>
+            </button>
+
+        </div>
+
+    </header>
+
+    <div class="container">
+        <!-- Stats Cards -->
+        <div class="stats-grid">
+            <div class="stat-card">
+                <div class="stat-label">Detected Issues</div>
+                <div class="stat-value" id="statDetected">0</div>
+                <div class="stat-meta">
+                    <span class="indicator blue"></span>
+                    <span id="detectedToday">+0 today</span>
+                </div>
+            </div>
+
+            <div class="stat-card purple">
+                <div class="stat-label">Analyzing</div>
+                <div class="stat-value" id="statAnalyzing">0</div>
+                <div class="stat-meta">
+                    <span class="indicator green"></span>
+                    <span>Active</span>
+                </div>
+            </div>
+
+            <div class="stat-card green">
+                <div class="stat-label">Fixes Ready</div>
+                <div class="stat-value" id="statFixReady">0</div>
+                <div class="stat-meta">
+                    <span>Pending review</span>
+                </div>
+            </div>
+
+            <div class="stat-card yellow">
+                <div class="stat-label">PRs Created</div>
+                <div class="stat-value" id="statPRs">0</div>
+                <div class="stat-meta">
+                    <span id="prMerged">0 merged</span>
+                </div>
+            </div>
+        </div>
+
+        <!-- Charts -->
+        <div class="charts-row">
+            <div class="chart-card">
+                <div class="chart-header">
+                    <h3 class="chart-title">Issue Detection Trend (7 Days)</h3>
+                </div>
+                <div class="chart-container">
+                    <canvas id="trendChart"></canvas>
+                </div>
+            </div>
+
+            <div class="chart-card">
+                <div class="chart-header">
+                    <h3 class="chart-title">Fix Success Rate</h3>
+                </div>
+                <div class="chart-container">
+                    <canvas id="successChart"></canvas>
+                </div>
+            </div>
+        </div>
+
+        <!-- Pending Fixes -->
+        <div class="section">
+            <div class="section-header">
+                <h2 class="section-title">
+                    Pending Fixes
+                    <span class="count" id="pendingCount">0</span>
+                </h2>
+                <div style="display:flex;gap:6px;align-items:center;flex-wrap:wrap;">
+                    <input type="text" id="serviceSearchInput" placeholder="Search service..." oninput="setServiceSearch(this.value)"
+                        style="background:rgba(255,255,255,.07);border:1px solid rgba(255,255,255,.15);border-radius:6px;color:#e6edf3;padding:5px 10px;font-size:13px;min-width:160px;outline:none;">
+                    <button class="btn btn-secondary status-filter-btn active" data-status="" onclick="setStatusFilter(this,'')">All</button>
+                    <button class="btn btn-secondary status-filter-btn" data-status="pending" onclick="setStatusFilter(this,'pending')">Pending</button>
+                    <button class="btn btn-success status-filter-btn" data-status="fix_ready" onclick="setStatusFilter(this,'fix_ready')">Fix Ready</button>
+                    <button class="btn btn-secondary status-filter-btn" data-status="failed" onclick="setStatusFilter(this,'failed')">Failed</button>
+                    <button class="btn btn-secondary status-filter-btn" data-status="pr_created" onclick="setStatusFilter(this,'pr_created')">PR Created</button>
+                    <button class="btn btn-secondary" onclick="refreshIssues()">Refresh</button>
+                </div>
+            </div>
+
+            <div class="issue-list" id="issueList">
+                <div class="loading">
+                    <div class="spinner"></div>
+                    Loading issues...
+                </div>
+            </div>
+        </div>
+
+        <!-- Detection History (24h) -->
+        <div class="section">
+            <div class="section-header">
+                <h2 class="section-title">Detection History (Last 24h)
+                    <span class="count" id="historyCount">0</span>
+                </h2>
+                <button class="btn btn-secondary" onclick="loadHistory()">Refresh History</button>
+            </div>
+            <div class="history-list">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Time</th>
+                            <th>Service</th>
+                            <th>Namespace</th>
+                            <th>Exception</th>
+                            <th>Status</th>
+                        </tr>
+                    </thead>
+                    <tbody id="historyTable">
+                        <tr>
+                            <td colspan="5" class="loading">
+                                <div class="spinner"></div>
+                                Loading history...
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- PR History -->
+        <div class="section">
+            <div class="section-header">
+                <h2 class="section-title">PR History</h2>
+                <div style="display:flex;align-items:center;gap:10px">
+                    <select id="prTimeRange" onchange="loadPRs()" style="background:#1a1a2e;color:#e0e0ff;border:1px solid #333;border-radius:6px;padding:5px 10px;font-size:13px;cursor:pointer">
+                        <option value="1">Last 1 hour</option>
+                        <option value="6">Last 6 hours</option>
+                        <option value="12">Last 12 hours</option>
+                        <option value="24" selected>Last 24 hours</option>
+                        <option value="72">Last 3 days</option>
+                        <option value="168">Last 7 days</option>
+                    </select>
+                    <button class="btn btn-secondary" onclick="exportPRs()">Export</button>
+                </div>
+            </div>
+
+            <div class="table-container">
+                <table>
+                    <thead>
+                        <tr>
+                            <th>Service</th>
+                            <th>Issue</th>
+                            <th>PR</th>
+                            <th>Status</th>
+                            <th>Created</th>
+                        </tr>
+                    </thead>
+                    <tbody id="prTable">
+                        <tr>
+                            <td colspan="5" class="loading">
+                                <div class="spinner"></div>
+                                Loading PRs...
+                            </td>
+                        </tr>
+                    </tbody>
+                </table>
+            </div>
+        </div>
+
+        <!-- Bottom Panels -->
+        <div class="panels-row">
+            <div class="panel">
+                <h3 class="panel-title">LLM Performance</h3>
+                <div class="llm-stats" id="llmStats">
+                    <div class="llm-stat-row">
+                        <span class="llm-stat-label">Model</span>
+                        <span class="llm-stat-value" id="llmModel">-</span>
+                    </div>
+                    <div class="llm-stat-row">
+                        <span class="llm-stat-label">Provider</span>
+                        <span class="llm-stat-value" id="llmProvider">-</span>
+                    </div>
+                    <div class="llm-stat-row">
+                        <span class="llm-stat-label">Avg Response Time</span>
+                        <span class="llm-stat-value" id="llmAvgTime">-</span>
+                    </div>
+                    <div class="llm-stat-row">
+                        <span class="llm-stat-label">Tokens/Call</span>
+                        <span class="llm-stat-value" id="llmTokens">-</span>
+                    </div>
+                    <div class="llm-stat-row">
+                        <span class="llm-stat-label">Total Tokens</span>
+                        <span class="llm-stat-value" id="llmTotalTokens">-</span>
+                    </div>
+                    <div class="llm-stat-row">
+                        <span class="llm-stat-label">Success Rate</span>
+                        <span class="llm-stat-value" id="llmSuccessRate">-</span>
+                    </div>
+                    <div class="llm-stat-row">
+                        <span class="llm-stat-label">Total Calls</span>
+                        <span class="llm-stat-value" id="llmTotalFixes">-</span>
+                    </div>
+                </div>
+            </div>
+
+            <div class="panel">
+                <h3 class="panel-title">Top Issue Types</h3>
+                <div class="type-list" id="typeList">
+                    <!-- Populated by JS -->
+                </div>
+            </div>
+        </div>
+
+    </div>
+
+    <!-- Settings Modal -->
+    <div class="modal-bg" id="settingsModal" onclick="if(event.target===this)closeSettings()">
+        <div class="modal-card" style="max-width: 800px;">
+            <div class="modal-head">
+                <h3 style="margin:0">&#9881; Settings - Service to Repository Mapping</h3>
+                <button class="btn btn-secondary" onclick="closeSettings()">Close</button>
+            </div>
+            <div style="padding: 1.5rem;">
+                <p style="color: var(--cxa-text-muted); margin-bottom: 1rem; font-size: 0.875rem;">
+                    Map service names to their GitHub repository names. This is used when cloning repos for code analysis.
+                </p>
+                <div style="display: flex; gap: 0.5rem; margin-bottom: 1rem;">
+                    <button class="btn btn-primary" onclick="addMappingRow()">+ Add Mapping</button>
+                    <button class="btn btn-success" onclick="saveRepoMappings()">Save All</button>
+                </div>
+                <div class="table-container" style="max-height: 400px; overflow-y: auto;">
+                    <table id="repoMappingTable">
+                        <thead>
+                            <tr>
+                                <th>Namespace</th>
+                                <th>Service Name</th>
+                                <th>Repository Name</th>
+                                <th style="width: 100px;">Actions</th>
+                            </tr>
+                        </thead>
+                        <tbody id="repoMappingBody">
+                            <!-- Populated by JS -->
+                        </tbody>
+                    </table>
+                </div>
+                <div id="mappingStatus" style="margin-top: 1rem; font-size: 0.875rem; color: var(--cxa-text-muted);"></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-bg" id="issueReportModal">
+        <div class="modal-card" style="max-width:860px">
+            <div class="modal-head">
+                <h3 style="margin:0">AI Fix Report</h3>
+                <button class="btn btn-secondary" onclick="closeIssueReport()">Close</button>
+            </div>
+            <!-- charts row: confidence + exception distribution -->
+            <div class="report-charts-row" id="reportChartsRow" style="display:none">
+                <div class="report-chart-box" style="max-width:220px">
+                    <h4>Error Severity</h4>
+                    <canvas id="reportConfidenceChart" width="180" height="180"></canvas>
+                    <div id="reportRatingBars" style="margin-top:0.6rem"></div>
+                </div>
+                <div class="report-chart-box">
+                    <h4>Exception Distribution (All Services)</h4>
+                    <canvas id="reportExcDistChart" height="180"></canvas>
+                </div>
+            </div>
+            <div id="issueReportBody" class="report-grid">
+                <div class="report-box full-width"><h4>Loading</h4><pre class="report-pre">Fetching report...</pre></div>
+            </div>
+        </div>
+    </div>
+
+    <div class="modal-bg" id="analysisLogModal" onclick="if(event.target===this)closeAnalysisLog()">
+        <div class="modal-card" style="max-width:760px">
+            <div class="modal-head">
+                <h3 style="margin:0">Analysis Log</h3>
+                <button class="btn btn-secondary" onclick="closeAnalysisLog()">Close</button>
+            </div>
+            <div id="analysisLogBody" style="max-height:60vh;overflow:auto;font-family:monospace;font-size:13px;line-height:1.55;padding:4px 2px">
+                <div style="opacity:.6">Starting…</div>
+            </div>
+        </div>
+    </div>
+
+    <div class="toast-container" id="toastContainer"></div>
+
+    <script>
+        const API_BASE = '/ai-agent/codexa/api';
+        let trendChart = null;
+        let successChart = null;
+        let currentModelId = '';
+        let selectedWindowMinutes = 60;
+
+        function getSelectedWindowMinutes() {
+            const el = document.getElementById('issueWindow');
+            const raw = el ? Number(el.value || selectedWindowMinutes) : selectedWindowMinutes;
+            if (!Number.isFinite(raw)) return 60;
+            return Math.max(5, Math.min(Math.floor(raw), 1440));
+        }
+
+        function onWindowChange() {
+            selectedWindowMinutes = getSelectedWindowMinutes();
+            loadStats();
+            loadIssues();
+        }
+
+        // Initialize
+        document.addEventListener('DOMContentLoaded', () => {
+            loadModels();
+            loadStats();
+            loadIssues();
+            loadPRs();
+            loadHistory();
+            loadLLMStats();
+
+            // Auto-refresh every 10 seconds
+            setInterval(() => {
+                loadStats();
+                loadIssues();
+                loadHistory();
+            }, 10000);
+
+            // Cursor-following neon glow on every button (includes dynamically added ones)
+            document.addEventListener('mousemove', e => {
+                const btn = e.target.closest('.btn');
+                if (!btn) return;
+                const r = btn.getBoundingClientRect();
+                btn.style.setProperty('--mx', (e.clientX - r.left) + 'px');
+                btn.style.setProperty('--my', (e.clientY - r.top) + 'px');
+            });
+        });
+
+        // Load available models
+        async function loadModels() {
+            try {
+                const res = await fetch(`${API_BASE}/llm/models`);
+                if (!res.ok) {
+                    throw new Error(`HTTP ${res.status}`);
+                }
+                const data = await res.json();
+
+                const select = document.getElementById('modelSelect');
+                if (!data || !Array.isArray(data.models) || data.models.length === 0) {
+                    select.innerHTML = '<option value="">No models available</option>';
+                    return;
+                }
+                const selectedModel = data.current_model || data.current || '';
+                select.innerHTML = data.models.map(m =>
+                    `<option value="${m.id}" ${m.id === selectedModel ? 'selected' : ''}>
+                        ${m.name}
+                    </option>`
+                ).join('');
+                currentModelId = selectedModel || (data.models[0] && data.models[0].id) || '';
+                if (currentModelId) {
+                    select.value = currentModelId;
+                }
+            } catch (e) {
+                console.error('Failed to load models:', e);
+                const select = document.getElementById('modelSelect');
+                if (select) {
+                    select.innerHTML = '<option value="">Failed to load models</option>';
+                }
+            }
+        }
+
+        // Change LLM model
+        async function changeModel(modelId) {
+            const select = document.getElementById('modelSelect');
+            const previousModel = currentModelId;
+            if (!modelId) {
+                if (select && previousModel) select.value = previousModel;
+                return;
+            }
+
+            if (modelId === previousModel) {
+                return;
+            }
+
+            const selectedText = select && select.selectedOptions && select.selectedOptions.length
+                ? select.selectedOptions[0].textContent.trim()
+                : modelId;
+            const confirmed = confirm(`Switch active model to ${selectedText}?`);
+            if (!confirmed) {
+                if (select && previousModel) select.value = previousModel;
+                return;
+            }
+
+            if (select) select.disabled = true;
+            try {
+                const res = await fetch(`${API_BASE}/llm/model`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ model_id: modelId })
+                });
+
+                const out = await res.json();
+
+                if (res.ok) {
+                    currentModelId = modelId;
+                    const provider = out && out.provider ? ` (${out.provider})` : '';
+                    showToast(`Model changed successfully${provider}`, 'success');
+                    loadLLMStats();
+                } else {
+                    if (select && previousModel) select.value = previousModel;
+                    showToast((out && out.error) || 'Failed to change model', 'error');
+                }
+            } catch (e) {
+                if (select && previousModel) select.value = previousModel;
+                showToast('Error changing model', 'error');
+            } finally {
+                if (select) select.disabled = false;
+            }
+        }
+
+        // Load dashboard stats
+        async function loadStats() {
+            try {
+                const windowMinutes = getSelectedWindowMinutes();
+                const res = await fetch(`${API_BASE}/stats?window_minutes=${encodeURIComponent(windowMinutes)}`);
+                if (!res.ok) {
+                    throw new Error(`stats HTTP ${res.status}`);
+                }
+                const data = await res.json();
+
+                document.getElementById('statDetected').textContent = data.detected || 0;
+                document.getElementById('statAnalyzing').textContent = data.analyzing || 0;
+                document.getElementById('statFixReady').textContent = data.fix_ready || 0;
+                document.getElementById('statPRs').textContent = data.prs_created || 0;
+                document.getElementById('prMerged').textContent = `${data.prs_merged || 0} merged`;
+                document.getElementById('pendingCount').textContent = data.fix_ready || 0;
+
+                // Make fix_ready stat clickable to jump to filtered view
+                const fixReadyEl = document.getElementById('statFixReady');
+                fixReadyEl.style.cursor = 'pointer';
+                fixReadyEl.title = 'Click to show all Fix Ready issues';
+                fixReadyEl.onclick = () => {
+                    const btn = document.querySelector('.status-filter-btn[data-status="fix_ready"]');
+                    if (btn) setStatusFilter(btn, 'fix_ready');
+                    document.querySelector('.section').scrollIntoView({behavior:'smooth'});
+                };
+
+                // Update charts
+                updateTrendChart(data.trend || []);
+                updateSuccessChart(data.success_rate || 0);
+                updateTypeList(data.issue_types || []);
+            } catch (e) {
+                console.error('Failed to load stats:', e);
+            }
+        }
+
+        // Update trend chart
+        function updateTrendChart(trend) {
+            const ctx = document.getElementById('trendChart').getContext('2d');
+
+            if (trendChart) {
+                trendChart.destroy();
+            }
+
+            const labels = trend.map(t => t.day);
+            const values = trend.map(t => t.count);
+
+            trendChart = new Chart(ctx, {
+                type: 'line',
+                data: {
+                    labels,
+                    datasets: [{
+                        label: 'Issues',
+                        data: values,
+                        borderColor: '#00d4ff',
+                        backgroundColor: 'rgba(0, 212, 255, 0.1)',
+                        borderWidth: 2,
+                        fill: true,
+                        tension: 0.4
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    plugins: {
+                        legend: { display: false }
+                    },
+                    scales: {
+                        x: {
+                            grid: { color: 'rgba(255,255,255,0.05)' },
+                            ticks: { color: '#8892a0' }
+                        },
+                        y: {
+                            grid: { color: 'rgba(255,255,255,0.05)' },
+                            ticks: { color: '#8892a0' },
+                            beginAtZero: true
+                        }
+                    }
+                }
+            });
+        }
+
+        // Update success rate chart
+        function updateSuccessChart(rate) {
+            const ctx = document.getElementById('successChart').getContext('2d');
+
+            if (successChart) {
+                successChart.destroy();
+            }
+
+            successChart = new Chart(ctx, {
+                type: 'doughnut',
+                data: {
+                    labels: ['Success', 'Failed'],
+                    datasets: [{
+                        data: [rate, 100 - rate],
+                        backgroundColor: ['#00ff88', '#2a3441'],
+                        borderWidth: 0
+                    }]
+                },
+                options: {
+                    responsive: true,
+                    maintainAspectRatio: false,
+                    cutout: '70%',
+                    plugins: {
+                        legend: { display: false },
+                        tooltip: {
+                            callbacks: {
+                                label: (ctx) => `${ctx.label}: ${ctx.raw}%`
+                            }
+                        }
+                    }
+                }
+            });
+
+            // Add center text
+            const centerText = document.createElement('div');
+            centerText.style.cssText = `
+                position: absolute;
+                top: 50%;
+                left: 50%;
+                transform: translate(-50%, -50%);
+                text-align: center;
+            `;
+            centerText.innerHTML = `
+                <div style="font-size: 2rem; font-weight: 700; color: #00ff88;">${rate}%</div>
+                <div style="font-size: 0.75rem; color: #8892a0;">Success</div>
+            `;
+        }
+
+        // Update type list
+        function updateTypeList(types) {
+            const container = document.getElementById('typeList');
+
+            if (!types.length) {
+                container.innerHTML = '<div class="empty-state">No data available</div>';
+                return;
+            }
+
+            container.innerHTML = types.slice(0, 5).map(t => `
+                <div class="type-item">
+                    <span class="type-name">${t.type}</span>
+                    <div class="type-bar">
+                        <div class="type-bar-fill" style="width: ${t.percentage}%"></div>
+                    </div>
+                    <span class="type-percent">${t.percentage}%</span>
+                </div>
+            `).join('');
+        }
+
+        // Load issues
+        let _currentStatusFilter = '';
+        let _serviceSearchTerm = '';
+
+        function setStatusFilter(btn, status) {
+            _currentStatusFilter = status;
+            document.querySelectorAll('.status-filter-btn').forEach(b => b.classList.remove('active'));
+            btn.classList.add('active');
+            loadIssues();
+        }
+
+        function setServiceSearch(value) {
+            _serviceSearchTerm = value.trim().toLowerCase();
+            loadIssues();
+        }
+
+        async function loadIssues() {
+            try {
+                const windowMinutes = getSelectedWindowMinutes();
+                const statusParam = _currentStatusFilter ? `&status=${encodeURIComponent(_currentStatusFilter)}` : '';
+                const res = await fetch(`${API_BASE}/issues?window_minutes=${encodeURIComponent(windowMinutes)}&limit=200${statusParam}`);
+                if (!res.ok) {
+                    throw new Error(`issues HTTP ${res.status}`);
+                }
+                const data = await res.json();
+
+                const container = document.getElementById('issueList');
+
+                let issues = data.issues || [];
+                if (_serviceSearchTerm) {
+                    issues = issues.filter(i =>
+                        (i.service_name || '').toLowerCase().includes(_serviceSearchTerm) ||
+                        (i.namespace || '').toLowerCase().includes(_serviceSearchTerm)
+                    );
+                }
+
+                if (!issues.length) {
+                    container.innerHTML = `
+                        <div class="empty-state">
+                            <h3>No pending issues</h3>
+                            <p>${_serviceSearchTerm ? `No results for "${_serviceSearchTerm}"` : 'Issues will appear here when detected from running services'}</p>
+                        </div>
+                    `;
+                    return;
+                }
+
+                container.innerHTML = issues.map(issue => `
+                    <div class="issue-card" data-id="${issue.id}">
+                        <div class="issue-header">
+                            <div class="issue-service">
+                                <div class="indicator ${issue.status === 'analyzing' ? 'analyzing' : ''}"></div>
+                                <div>
+                                    <h3>${issue.service_name}</h3>
+                                    <span class="namespace">${issue.namespace}</span>
+                                </div>
+                            </div>
+                            <span class="issue-badge">${issue.exception_type || 'Unknown'}</span>
+                        </div>
+
+                        <div class="issue-details">
+                            <div class="issue-location">${issue.file_path || 'Unknown file'}:${issue.line_number || '?'}</div>
+                            <div class="issue-description">${issue.exception_message || 'No description'}</div>
+                        </div>
+
+                        <div class="issue-meta">
+                            <span>Confidence: <strong>${Math.round((issue.confidence || 0) * 100)}%</strong></span>
+                            <span>File: ${issue.file_path || 'Unknown'}</span>
+                            ${Number(issue.occurrence_count || issue.repeat_count || 1) > 1
+                                ? `<span style="color:#ffd700;font-weight:700">🔁 ×${Number(issue.occurrence_count || issue.repeat_count)} occurrences</span>`
+                                : ''}
+                            ${issue.last_seen_at ? `<span style="color:#8899aa">Last seen: ${new Date(issue.last_seen_at).toLocaleTimeString('en-IN', {timeZone:'Asia/Kolkata', hour:'2-digit', minute:'2-digit', second:'2-digit', hour12:false})} IST</span>` : ''}
+                        </div>
+
+                        ${issue.diff_preview ? `
+                            <div class="diff-preview">
+                                ${formatDiff(issue.diff_preview)}
+                            </div>
+                        ` : ''}
+
+                        <div class="issue-actions">
+                            ${issue.status === 'fix_ready' ? `
+                                <button class="btn btn-primary" onclick="viewDiff('${issue.id}')">View Full Diff</button>
+                                <button class="btn btn-success" onclick="createPR('${issue.id}')">Create PR</button>
+                            ` : issue.status === 'analyzing' ? `
+                                <button class="btn btn-secondary" disabled>Analyzing...</button>
+                            ` : `
+                                <button class="btn btn-primary" onclick="analyzeIssue('${issue.id}')">Analyze</button>
+                            `}
+                            <button class="btn btn-secondary" onclick="openAnalysisLog('${issue.id}')">Logs</button>
+                            <button class="btn btn-secondary" onclick="openIssueReport('${issue.id}')">AI Report</button>
+                            <button class="btn btn-danger" onclick="dismissIssue('${issue.id}')">Dismiss</button>
+                        </div>
+                    </div>
+                `).join('');
+            } catch (e) {
+                console.error('Failed to load issues:', e);
+                const container = document.getElementById('issueList');
+                if (container) {
+                    container.innerHTML = `<div class="empty-state"><h3>Failed to load issues</h3><p>${e.message || 'Server error — check logs'}</p></div>`;
+                }
+            }
+        }
+
+        // Format diff for display
+        function formatDiff(diff) {
+            return diff.split('\n').map(line => {
+                if (line.startsWith('+')) {
+                    return `<div class="diff-line added">${escapeHtml(line)}</div>`;
+                } else if (line.startsWith('-')) {
+                    return `<div class="diff-line removed">${escapeHtml(line)}</div>`;
+                }
+                return `<div class="diff-line">${escapeHtml(line)}</div>`;
+            }).join('');
+        }
+
+        function escapeHtml(text) {
+            return text
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;');
+        }
+
+        // Analyze issue
+        async function analyzeIssue(id) {
+            try {
+                showToast('Starting analysis...', 'success');
+                openAnalysisLog(id);   // live step-by-step box
+
+                const res = await fetch(`${API_BASE}/issues/${id}/analyze`, {
+                    method: 'POST'
+                });
+
+                if (res.ok) {
+                    loadIssues();
+                    loadStats();
+                } else {
+                    const out = await res.json().catch(() => ({}));
+                    showToast(out.error || 'Analysis failed', 'error');
+                }
+            } catch (e) {
+                showToast('Error starting analysis', 'error');
+            }
+        }
+
+        // ===== Live analysis log box =====
+        let analysisLogTimer = null;
+        const STEP_ICON  = { ok:'✅', running:'⏳', warn:'⚠️', error:'❌' };
+        const STEP_COLOR = { ok:'#3fb950', running:'#d29922', warn:'#d29922', error:'#f85149' };
+
+        function closeAnalysisLog() {
+            const m = document.getElementById('analysisLogModal');
+            if (m) m.classList.remove('show');
+            if (analysisLogTimer) { clearInterval(analysisLogTimer); analysisLogTimer = null; }
+        }
+
+        function renderAnalysisLog(data) {
+            const body = document.getElementById('analysisLogBody');
+            if (!body) return;
+            const steps = data.steps || [];
+            if (!steps.length) {
+                body.innerHTML = '<div style="opacity:.6">Waiting for the first step…</div>';
+                return;
+            }
+            body.innerHTML = steps.map(s => {
+                const icon = STEP_ICON[s.status] || '•';
+                const color = STEP_COLOR[s.status] || '#c9d1d9';
+                const detail = s.detail
+                    ? `<div style="margin:1px 0 8px 22px;color:#8b949e;white-space:pre-wrap;word-break:break-word">${escapeHtml(s.detail)}</div>`
+                    : '';
+                return `<div style="color:${color}">${icon} ${escapeHtml(s.name)} <span style="color:#6e7681;font-size:11px">${escapeHtml(s.status)}</span></div>${detail}`;
+            }).join('');
+            const terminal = ['fix_ready','pr_created','failed','merged','dismissed'].includes(data.status);
+            if (terminal && analysisLogTimer) {
+                clearInterval(analysisLogTimer); analysisLogTimer = null;
+                loadIssues(); loadStats();
+            }
+        }
+
+        async function pollAnalysisLog(id) {
+            try {
+                const res = await fetch(`${API_BASE}/issues/${encodeURIComponent(id)}/analysis-log`);
+                if (res.ok) renderAnalysisLog(await res.json());
+            } catch (e) { /* keep polling */ }
+        }
+
+        function openAnalysisLog(id) {
+            const m = document.getElementById('analysisLogModal');
+            if (m) m.classList.add('show');
+            const body = document.getElementById('analysisLogBody');
+            if (body) body.innerHTML = '<div style="opacity:.6">Starting…</div>';
+            if (analysisLogTimer) clearInterval(analysisLogTimer);
+            pollAnalysisLog(id);
+            analysisLogTimer = setInterval(() => pollAnalysisLog(id), 1500);
+        }
+
+        // Create PR
+        async function createPR(id) {
+            try {
+                showToast('Creating PR...', 'success');
+
+                const res = await fetch(`${API_BASE}/issues/${id}/fix`, {
+                    method: 'POST'
+                });
+
+                if (res.ok) {
+                    const data = await res.json();
+                    showToast(`PR created: ${data.pr_url}`, 'success');
+                    loadIssues();
+                    loadPRs();
+                    loadStats();
+                } else {
+                    const out = await res.json().catch(() => ({}));
+                    showToast(out.error || 'Failed to create PR', 'error');
+                }
+            } catch (e) {
+                showToast('Error creating PR', 'error');
+            }
+        }
+
+        // Dismiss issue
+        async function dismissIssue(id) {
+            if (!confirm('Are you sure you want to dismiss this issue?')) return;
+
+            try {
+                const res = await fetch(`${API_BASE}/issues/${id}/dismiss`, {
+                    method: 'POST'
+                });
+
+                if (res.ok) {
+                    loadIssues();
+                    loadStats();
+                }
+            } catch (e) {
+                showToast('Error dismissing issue', 'error');
+            }
+        }
+
+        // View full diff
+        function viewDiff(id) {
+            window.open(`${API_BASE}/issues/${id}`, '_blank');
+        }
+
+        // Refresh issues
+        function refreshIssues() {
+            loadIssues();
+            loadStats();
+            loadHistory();
+            showToast('Refreshed', 'success');
+        }
+
+        // Scan for new issues from AI Monitoring Agent
+        async function scanForIssues() {
+            const btn = document.getElementById('scanBtn');
+            const btnText = document.getElementById('scanBtnText');
+
+            btn.disabled = true;
+            btnText.textContent = 'Scanning...';
+
+            try {
+                const windowMinutes = getSelectedWindowMinutes();
+                const res = await fetch(`${API_BASE}/detect`, {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ window_minutes: windowMinutes })
+                });
+                const data = await res.json();
+
+                if (res.ok && data.status === 'ok') {
+                    showToast(`Found ${data.detected_count} new issues (window ${windowMinutes}m)`, 'success');
+                    loadIssues();
+                    loadStats();
+                    loadHistory();
+                } else {
+                    showToast(data.error || 'Scan failed', 'error');
+                }
+            } catch (e) {
+                console.error('Scan error:', e);
+                showToast('Failed to scan for issues', 'error');
+            } finally {
+                btn.disabled = false;
+                btnText.textContent = 'Scan for Issues';
+            }
+        }
+
+        async function loadHistory() {
+            try {
+                const res = await fetch(`${API_BASE}/history?hours=24&limit=300&dedupe=true`);
+                if (!res.ok) {
+                    throw new Error(`history HTTP ${res.status}`);
+                }
+                const data = await res.json();
+                const tbody = document.getElementById('historyTable');
+                const countEl = document.getElementById('historyCount');
+                const items = Array.isArray(data.items) ? data.items : [];
+                countEl.textContent = String(items.length);
+
+                if (!items.length) {
+                    tbody.innerHTML = '<tr><td colspan="5" class="empty-state">No detections in last 24h</td></tr>';
+                    return;
+                }
+
+                tbody.innerHTML = items.slice(0, 200).map(item => {
+                    const issue = item.issue || {};
+                    const svc = issue.service_name || item.service || '-';
+                    const ns = issue.namespace || item.namespace || '-';
+                    const ex = issue.exception_type || item.exception || '-';
+                    const st = issue.status || item.status || '-';
+                    const ts = item.detected_at || item.timestamp || '';
+                    return `<tr>
+                        <td>${safeText(formatTime(ts))}</td>
+                        <td>${safeText(svc)}</td>
+                        <td>${safeText(ns)}</td>
+                        <td>${safeText(ex)}</td>
+                        <td>${safeText(st)}</td>
+                    </tr>`;
+                }).join('');
+            } catch (e) {
+                console.error('Failed to load history:', e);
+            }
+        }
+
+        function closeIssueReport() {
+            const modal = document.getElementById('issueReportModal');
+            if (modal) modal.classList.remove('show');
+            const chartsRow = document.getElementById('reportChartsRow');
+            if (chartsRow) chartsRow.style.display = 'none';
+            if (window._reportConfChart) { window._reportConfChart.destroy(); window._reportConfChart = null; }
+            if (window._reportExcChart) { window._reportExcChart.destroy(); window._reportExcChart = null; }
+        }
+
+        async function openIssueReport(issueId) {
+            const modal = document.getElementById('issueReportModal');
+            const body = document.getElementById('issueReportBody');
+            if (!modal || !body) return;
+
+            modal.classList.add('show');
+            body.innerHTML = '<div class="report-box"><h4>Loading</h4><pre class="report-pre">Fetching report...</pre></div>';
+
+            try {
+                const res = await fetch(`${API_BASE}/issues/${encodeURIComponent(issueId)}/report`);
+                if (!res.ok) {
+                    throw new Error(`report HTTP ${res.status}`);
+                }
+                const data = await res.json();
+                const issue = data.issue || {};
+                const analysis = data.analysis || {};
+                const pr = data.pr || {};
+
+                const issueSummary = [
+                    `Service: ${issue.service_name || '-'}/${issue.namespace || '-'}`,
+                    `Issue: ${issue.exception_type || '-'} | Status: ${issue.status || '-'}`,
+                    `Code Location: ${issue.file_path || '-'}:${issue.line_number || '-'}`,
+                    `Confidence: ${issue.confidence != null ? Math.round(Number(issue.confidence || 0) * 100) + '%' : '-'}`,
+                    `Detected At: ${issue.detected_at ? new Date(issue.detected_at).toLocaleString('en-IN', {timeZone:'Asia/Kolkata', hour:'2-digit', minute:'2-digit', second:'2-digit', day:'2-digit', month:'short', year:'numeric', hour12:false}) + ' IST' : '-'}`,
+                ].join('\n');
+
+                const observed = [
+                    `Exception Message:\n${issue.exception_message || '-'}`,
+                    '',
+                    `Log Evidence:\n${issue.log_evidence || '-'}`,
+                    '',
+                    `Stack Trace (excerpt):\n${issue.stack_trace || '-'}`,
+                ].join('\n');
+
+                const changeSummary = [
+                    `Fix Ready: ${analysis.fix_ready ? 'yes' : 'no'}`,
+                    `Changed Files: ${(analysis.changed_files || []).length ? analysis.changed_files.join(', ') : '-'}`,
+                    `Fix Description:\n${analysis.fix_description || '-'}`,
+                    '',
+                    `AI Reasoning:\n${analysis.llm_reasoning || '-'}`,
+                    '',
+                    `Verification: ${analysis.verification_status || '-'}\n${analysis.verification_output || ''}`,
+                ].join('\n');
+
+                const prSummary = [
+                    `PR Created: ${pr.created ? 'yes' : 'no'}`,
+                    `PR Number: ${pr.pr_number || '-'}`,
+                    `PR Status: ${pr.status || '-'}`,
+                    `PR URL: ${pr.pr_url || '-'}`,
+                    `PR Title: ${pr.title || '-'}`,
+                ].join('\n');
+
+                body.innerHTML = `
+                    <div class="report-box full-width"><h4>Issue Summary</h4><pre class="report-pre">${safeText(issueSummary)}</pre></div>
+                    <div class="report-box"><h4>Observed Evidence</h4><pre class="report-pre">${safeText(observed)}</pre></div>
+                    <div class="report-box"><h4>Code Changes Proposed</h4><pre class="report-pre">${safeText(changeSummary)}</pre></div>
+                    <div class="report-box"><h4>Pull Request</h4><pre class="report-pre">${safeText(prSummary)}</pre></div>
+                    <div class="report-box"><h4>Patch</h4><pre class="report-pre">${safeText(analysis.diff_patch || '-')}</pre></div>
+                `;
+
+                // --- Charts ---
+                const chartsRow = document.getElementById('reportChartsRow');
+                if (chartsRow) chartsRow.style.display = 'flex';
+
+                // 1. Confidence donut
+                const conf = Math.round(Number(issue.confidence || 0) * 100);
+                const confColor = conf >= 80 ? '#00ff88' : conf >= 50 ? '#ffd700' : '#ff4444';
+                const cCtx = document.getElementById('reportConfidenceChart');
+                if (cCtx) {
+                    if (window._reportConfChart) window._reportConfChart.destroy();
+                    window._reportConfChart = new Chart(cCtx, {
+                        type: 'doughnut',
+                        data: {
+                            datasets: [{
+                                data: [conf, 100 - conf],
+                                backgroundColor: [confColor, '#1a2030'],
+                                borderWidth: 0,
+                            }]
+                        },
+                        options: {
+                            cutout: '72%',
+                            plugins: {
+                                legend: { display: false },
+                                tooltip: { enabled: false },
+                            },
+                        },
+                        plugins: [{
+                            id: 'centerText',
+                            afterDraw(chart) {
+                                const { ctx, chartArea: { width, height, left, top } } = chart;
+                                ctx.save();
+                                ctx.font = 'bold 22px monospace';
+                                ctx.fillStyle = confColor;
+                                ctx.textAlign = 'center';
+                                ctx.textBaseline = 'middle';
+                                ctx.fillText(conf + '%', left + width / 2, top + height / 2);
+                                ctx.restore();
+                            }
+                        }]
+                    });
+                }
+
+                // Rating bars
+                const ratingEl = document.getElementById('reportRatingBars');
+                if (ratingEl) {
+                    const sev = conf >= 80 ? 'HIGH' : conf >= 50 ? 'MEDIUM' : 'LOW';
+                    const sevColor = conf >= 80 ? '#ff4444' : conf >= 50 ? '#ffd700' : '#00ff88';
+                    ratingEl.innerHTML = `
+                        <div style="font-size:11px;color:#8899aa;margin-bottom:4px">Confidence</div>
+                        <div class="rating-bar-wrap">
+                            <div class="rating-bar"><div class="rating-fill" style="width:${conf}%;background:${confColor}"></div></div>
+                            <span class="rating-label" style="color:${confColor}">${conf}%</span>
+                        </div>
+                        <div style="font-size:11px;color:#8899aa;margin:6px 0 4px">Severity</div>
+                        <div style="font-weight:700;color:${sevColor};font-size:15px">${sev}</div>
+                    `;
+                }
+
+                // 2. Exception distribution donut
+                const excCtx = document.getElementById('reportExcDistChart');
+                if (excCtx) {
+                    try {
+                        const statsRes = await fetch(`${API_BASE}/stats`);
+                        const statsData = await statsRes.json();
+                        const dist = statsData.issue_types || [];
+                        if (dist.length > 0) {
+                            const palette = ['#00d4ff','#00ff88','#ffd700','#ff6b6b','#c084fc','#38bdf8','#fb923c','#a3e635','#f472b6','#94a3b8'];
+                            if (window._reportExcChart) window._reportExcChart.destroy();
+                            window._reportExcChart = new Chart(excCtx, {
+                                type: 'doughnut',
+                                data: {
+                                    labels: dist.map(d => `${d.type} (${d.percentage}%)`),
+                                    datasets: [{
+                                        data: dist.map(d => d.count),
+                                        backgroundColor: dist.map((_, i) => palette[i % palette.length]),
+                                        borderWidth: 2,
+                                        borderColor: '#0a0f1a',
+                                    }]
+                                },
+                                options: {
+                                    cutout: '55%',
+                                    plugins: {
+                                        legend: {
+                                            display: true,
+                                            position: 'right',
+                                            labels: { color: '#c8d8e8', font: { size: 11 }, boxWidth: 12 }
+                                        },
+                                        tooltip: {
+                                            callbacks: {
+                                                label: ctx => ` ${ctx.label}: ${ctx.raw} issues`
+                                            }
+                                        }
+                                    },
+                                }
+                            });
+                        }
+                    } catch(_) {}
+                }
+
+            } catch (e) {
+                body.innerHTML = `<div class="report-box full-width"><h4>Error</h4><pre class="report-pre">${safeText(String(e))}</pre></div>`;
+            }
+        }
+
+        // Load PRs
+        async function loadPRs() {
+            try {
+                const hours = document.getElementById('prTimeRange')?.value || 24;
+                const res = await fetch(`${API_BASE}/prs?hours=${hours}`);
+                const data = await res.json();
+
+                const tbody = document.getElementById('prTable');
+
+                if (!data.prs || !data.prs.length) {
+                    tbody.innerHTML = `
+                        <tr>
+                            <td colspan="5" class="empty-state">No PRs created yet</td>
+                        </tr>
+                    `;
+                    return;
+                }
+
+                tbody.innerHTML = data.prs.map(pr => `
+                    <tr>
+                        <td>${pr.service_name}</td>
+                        <td>${pr.issue_type || 'Fix'}</td>
+                        <td>
+                            <a href="${pr.pr_url}" target="_blank" class="pr-link">
+                                #${pr.pr_number}
+                            </a>
+                        </td>
+                        <td>
+                            <span class="status-badge ${pr.status}">
+                                ${pr.status === 'merged' ? '✓' : pr.status === 'open' ? '◉' : '✕'}
+                                ${pr.status.charAt(0).toUpperCase() + pr.status.slice(1)}
+                            </span>
+                        </td>
+                        <td>${formatTime(pr.created_at)}</td>
+                    </tr>
+                `).join('');
+            } catch (e) {
+                console.error('Failed to load PRs:', e);
+            }
+        }
+
+        // Load LLM stats
+        async function loadLLMStats() {
+            try {
+                const res = await fetch(`${API_BASE}/llm/stats`);
+                const data = await res.json();
+
+                document.getElementById('llmModel').textContent = data.model || '-';
+                document.getElementById('llmProvider').textContent = data.provider || '-';
+                document.getElementById('llmAvgTime').textContent = data.avg_response_time
+                    ? `${data.avg_response_time.toFixed(1)}s` : '-';
+                document.getElementById('llmTokens').textContent = data.avg_tokens_per_call
+                    ? Math.round(data.avg_tokens_per_call) : '-';
+                document.getElementById('llmTotalTokens').textContent = data.total_tokens
+                    ? Math.round(data.total_tokens) : '-';
+                document.getElementById('llmSuccessRate').textContent = data.success_rate
+                    ? `${data.success_rate.toFixed(0)}%` : '-';
+                document.getElementById('llmTotalFixes').textContent = data.total_calls || 0;
+            } catch (e) {
+                console.error('Failed to load LLM stats:', e);
+            }
+        }
+
+        // Export PRs
+        function exportPRs() {
+            window.open(`${API_BASE}/prs?format=csv`, '_blank');
+        }
+
+        // Format time
+        function formatTime(isoString) {
+            if (!isoString) return '-';
+            const date = new Date(isoString);
+            if (Number.isNaN(date.getTime())) return String(isoString);
+            const now = new Date();
+            const diff = now - date;
+
+            if (diff < 3600000) {
+                return `${Math.round(diff / 60000)}m ago`;
+            } else if (diff < 86400000) {
+                return `${Math.round(diff / 3600000)}h ago`;
+            } else {
+                return `${Math.round(diff / 86400000)}d ago`;
+            }
+        }
+
+        function safeText(value) {
+            return String(value || '')
+                .replace(/&/g, '&amp;')
+                .replace(/</g, '&lt;')
+                .replace(/>/g, '&gt;')
+                .replace(/"/g, '&quot;')
+                .replace(/'/g, '&#39;');
+        }
+
+        // Show toast notification
+        function showToast(message, type = 'info') {
+            const container = document.getElementById('toastContainer');
+            const toast = document.createElement('div');
+            toast.className = `toast ${type}`;
+            toast.innerHTML = `
+                <span>${type === 'success' ? '✓' : type === 'error' ? '✕' : 'ℹ'}</span>
+                <span>${message}</span>
+            `;
+            container.appendChild(toast);
+
+            setTimeout(() => {
+                toast.remove();
+            }, 3000);
+        }
+
+        // ==================== Repo Mapping Functions ====================
+        let repoMappings = [];
+
+        // Open settings modal
+        function openSettings() {
+            document.getElementById('settingsModal').classList.add('active');
+            loadRepoMappings();
+        }
+
+        // Close settings modal
+        function closeSettings() {
+            document.getElementById('settingsModal').classList.remove('active');
+        }
+
+        // Load repo mappings
+        async function loadRepoMappings() {
+            try {
+                const res = await fetch('/ai-agent/api/codexa/repo-mappings');
+                if (res.ok) {
+                    const data = await res.json();
+                    repoMappings = data.mappings || [];
+                    renderRepoMappings();
+                    document.getElementById('mappingStatus').textContent =
+                        `Loaded ${repoMappings.length} mapping(s)`;
+                } else {
+                    document.getElementById('mappingStatus').textContent =
+                        'Failed to load mappings';
+                }
+            } catch (e) {
+                console.error('Failed to load repo mappings:', e);
+                document.getElementById('mappingStatus').textContent =
+                    'Error loading mappings';
+            }
+        }
+
+        // Render the mappings table
+        function renderRepoMappings() {
+            const tbody = document.getElementById('repoMappingBody');
+            if (repoMappings.length === 0) {
+                tbody.innerHTML = `
+                    <tr>
+                        <td colspan="4" style="text-align: center; color: var(--cxa-text-muted);">
+                            No mappings configured. Click "+ Add Mapping" to add one.
+                        </td>
+                    </tr>
+                `;
+                return;
+            }
+
+            tbody.innerHTML = repoMappings.map((m, idx) => `
+                <tr data-idx="${idx}">
+                    <td>
+                        <select class="mapping-input" data-field="namespace" style="width: 100%; padding: 6px; background: var(--cxa-surface-light); border: 1px solid var(--cxa-border); border-radius: 4px; color: var(--cxa-text);">
+                            <option value="" ${!m.namespace ? 'selected' : ''}>-- Any --</option>
+                            <option value="jupiter" ${m.namespace === 'jupiter' ? 'selected' : ''}>jupiter</option>
+                            <option value="venus" ${m.namespace === 'venus' ? 'selected' : ''}>venus</option>
+                        </select>
+                    </td>
+                    <td>
+                        <input type="text" class="mapping-input" data-field="service" value="${safeText(m.service)}"
+                               placeholder="e.g. conference-invoice"
+                               style="width: 100%; padding: 6px; background: var(--cxa-surface-light); border: 1px solid var(--cxa-border); border-radius: 4px; color: var(--cxa-text);">
+                    </td>
+                    <td>
+                        <input type="text" class="mapping-input" data-field="repo" value="${safeText(m.repo)}"
+                               placeholder="e.g. conference-booking-service"
+                               style="width: 100%; padding: 6px; background: var(--cxa-surface-light); border: 1px solid var(--cxa-border); border-radius: 4px; color: var(--cxa-text);">
+                    </td>
+                    <td>
+                        <button class="btn btn-danger" onclick="removeMappingRow(${idx})" title="Remove">
+                            &#10005;
+                        </button>
+                    </td>
+                </tr>
+            `).join('');
+
+            // Add change listeners
+            tbody.querySelectorAll('.mapping-input').forEach(input => {
+                input.addEventListener('change', (e) => {
+                    const row = e.target.closest('tr');
+                    const idx = parseInt(row.dataset.idx);
+                    const field = e.target.dataset.field;
+                    repoMappings[idx][field] = e.target.value.trim();
+                });
+            });
+        }
+
+        // Add a new mapping row
+        function addMappingRow() {
+            repoMappings.push({ namespace: 'jupiter', service: '', repo: '' });
+            renderRepoMappings();
+            // Focus on the new service input
+            const inputs = document.querySelectorAll('#repoMappingBody input[data-field="service"]');
+            if (inputs.length > 0) {
+                inputs[inputs.length - 1].focus();
+            }
+        }
+
+        // Remove a mapping row
+        function removeMappingRow(idx) {
+            if (confirm('Remove this mapping?')) {
+                repoMappings.splice(idx, 1);
+                renderRepoMappings();
+            }
+        }
+
+        // Save all repo mappings
+        async function saveRepoMappings() {
+            // Filter out empty rows
+            const validMappings = repoMappings.filter(m => m.service && m.repo);
+
+            if (validMappings.length === 0 && repoMappings.length > 0) {
+                showToast('Please fill in service and repo names', 'error');
+                return;
+            }
+
+            try {
+                document.getElementById('mappingStatus').textContent = 'Saving...';
+
+                const res = await fetch('/ai-agent/api/codexa/repo-mappings', {
+                    method: 'POST',
+                    headers: { 'Content-Type': 'application/json' },
+                    body: JSON.stringify({ mappings: validMappings })
+                });
+
+                const data = await res.json();
+
+                if (res.ok && data.status === 'success') {
+                    repoMappings = data.mappings || validMappings;
+                    renderRepoMappings();
+                    showToast(`Saved ${repoMappings.length} mapping(s) successfully`, 'success');
+                    document.getElementById('mappingStatus').textContent =
+                        `Saved ${repoMappings.length} mapping(s) at ${new Date().toLocaleTimeString()}`;
+                } else {
+                    showToast(data.message || 'Failed to save mappings', 'error');
+                    document.getElementById('mappingStatus').textContent =
+                        'Failed to save: ' + (data.message || 'Unknown error');
+                }
+            } catch (e) {
+                console.error('Failed to save repo mappings:', e);
+                showToast('Error saving mappings', 'error');
+                document.getElementById('mappingStatus').textContent = 'Error saving mappings';
+            }
+        }
+
+    </script>
+</body>
+</html>

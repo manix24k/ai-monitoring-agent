@@ -1,0 +1,53 @@
+apiVersion: v1
+kind: ConfigMap
+metadata:
+  name: {{ include "ai-monitoring-agent.fullname" . }}-config
+  labels:
+    {{- include "ai-monitoring-agent.labels" . | nindent 4 }}
+data:
+  config.json: |
+    {
+      "prometheus": {
+        "url": "{{ .Values.config.prometheus.url }}",
+        "urls": {{ toJson .Values.config.prometheus.urls }},
+        "metrics": {
+          "request_rate_query": "sum(rate(http_requests_total[5m]))",
+          "error_rate_query": "sum(rate(http_requests_total{code=~\"5..\"}[5m]))",
+          "latency_query": "histogram_quantile(0.95, sum(rate(http_request_duration_seconds_bucket[5m])) by (le))"
+        }
+      },
+      "elasticsearch": {
+        "hosts": {{ toJson .Values.config.elasticsearch.hosts }},
+        "index_prefix": "{{ .Values.config.elasticsearch.indexPrefix }}",
+        "log_limit": {{ .Values.config.elasticsearch.logLimit }},
+        "trace_limit": {{ .Values.config.elasticsearch.traceLimit }}
+      },
+      "anomaly_detection": {
+        "contamination": 0.1,
+        "window_size": 60,
+        "check_interval": 60
+      },
+      "learning": {
+        "model_dir": "./models",
+        "feedback_threshold": 50,
+        "history_limit": 1000,
+        "adaptive_threshold_window": 100
+      },
+      "llm": {
+        "api_url": "{{ .Values.config.llm.apiUrl }}",
+        "api_key": "{{ .Values.config.llm.apiKey }}",
+        "model": "{{ .Values.config.llm.model }}",
+        "timeout": {{ .Values.config.llm.timeout }}
+      },
+      "slack": {
+        "webhook_url": "{{ .Values.config.slack.webhook_url }}",
+        "channel": "#alerts",
+        "enable_feedback": true
+      },
+      "services": [
+        {
+          "name": "api-service",
+          "endpoints": ["/users", "/orders", "/products"]
+        }
+      ]
+    }
