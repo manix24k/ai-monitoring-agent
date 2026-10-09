@@ -1,0 +1,89 @@
+pipeline {
+    agent any
+    environment {
+        MANIFEST_REPO    = "git@github.com:fabhotelstech/k8s-manifest.git"
+        ACR_LOGIN_SERVER = 'fabhotelsdev.azurecr.io'
+        ACR_REPO         = "${ACR_LOGIN_SERVER}/fabhotels-development/ai-monitoring-agent"
+        LOCAL_IMAGE      = "asia-south1-docker.pkg.dev/fabhotels-development/fabhotels-registry/ai-sre-agent:latest"
+        MANIFEST_BRANCH  = 'ui-control-plane-redesign'
+        MANIFEST_PATH    = "ai-monitoring-agent/k8s/deployment.yaml"
+        SERVICE_NAME     = "ai-sre-agent"
+        ENV              = "jupiter"
+    }
+    stages {
+        stage('Delete Workspace') {
+            steps {
+                deleteDir()
+            }
+        }
+        stage('Git Clone Repository') {
+            steps {
+                git branch: 'main', credentialsId: 'jenkins-bitbucket-ssh-key-4', url: 'git@github.com:fabhotelstech/ai-sre-agent.git'
+            }
+        }
+        stage('Login to ACR') {
+            steps {
+                sh '''
+                    az login --identity
+                    az acr login --name fabhotelsdev
+                '''
+            }
+        }
+        stage('Building Docker Image') {
+            steps {
+                sh """
+                    # Running build directly at workspace root context
+                    docker build -t ${LOCAL_IMAGE} .
+                    docker tag ${LOCAL_IMAGE} ${ACR_REPO}:${ENV}-${BUILD_NUMBER}
+                    docker tag ${LOCAL_IMAGE} ${ACR_REPO}:${ENV}
+                """
+            }
+        }
+        stage('Pushing Image to ACR') {
+            steps {
+                sh """
+                    docker push ${ACR_REPO}:${ENV}-${BUILD_NUMBER}
+                    docker push ${ACR_REPO}:${ENV}
+                """
+            }
+        }
+        stage('Git Clone and Update Manifest for ArgoCD') {
+            steps {
+                dir("manifest-update") {
+                    sshagent (credentials: ['jenkins-bitbucket-ssh-key-4']) {
+                        git credentialsId: 'jenkins-bitbucket-ssh-key-4',
+                            url: "${MANIFEST_REPO}",
+                            branch: "${MANIFEST_BRANCH}"
+                        sh """#!/bin/bash
+                            git config user.email "jenkins@fabhotels.com"
+                            git config user.name "Jenkins Automation"
+                            git pull --rebase origin ${MANIFEST_BRANCH}
+                            
+                            # Updating manifest target to match the new ACR Tag scheme
+                            sed -i 's|^\\(\\s*image:\\s*\\).*|\\1${ACR_REPO}:'\"\$ENV\"'-'\"\$BUILD_NUMBER\"'|' ${MANIFEST_PATH}
+                            
+                            git add ${MANIFEST_PATH}
+                            git commit -m "Update AI monitoring agent image tag to build ${BUILD_NUMBER} (ACR Migration)" || echo 'No changes to commit'
+                            git push origin ${MANIFEST_BRANCH}
+                        """
+                    }
+                }
+            }
+        }
+        stage('Removing Local Images') {
+            steps {
+                sh """
+                    docker rmi -f ${ACR_REPO}:${ENV}-${BUILD_NUMBER}
+                    docker rmi -f ${ACR_REPO}:${ENV}
+                    docker rmi -f ${LOCAL_IMAGE} || true
+                """
+            }
+        }
+    }
+    
+    post {
+        always {
+            cleanWs()
+        }
+    }
+}
