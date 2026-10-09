@@ -3,7 +3,6 @@
 Feedback Handler for AI Monitoring Agent
 """
 import json
-import os
 from typing import Dict, Any
 from learning_engine import LearningEngine
 import ollama
@@ -11,12 +10,6 @@ import ollama
 class FeedbackHandler:
     def __init__(self, learning_engine: LearningEngine):
         self.learning_engine = learning_engine
-        # Ollama feedback insights are optional and disabled by default.
-        ollama_enabled = os.getenv("OLLAMA_ENABLED", "false").strip().lower() in {"1", "true", "yes"}
-        if not ollama_enabled:
-            self.ollama_client = None
-            return
-
         # Initialize Ollama client for feedback analysis
         try:
             # Test connection to Ollama
@@ -129,18 +122,8 @@ class FeedbackHandler:
 
                 Respond with only the insights, one per line, without any additional explanation."""
 
-                model_name = os.getenv("OLLAMA_MODEL", "").strip()
-                if not model_name:
-                    return {
-                        'total_feedback': total_feedback,
-                        'feedback_by_type': feedback_by_type,
-                        'accuracy_rate': accuracy_rate,
-                        'last_feedback': feedback_data[-5:] if feedback_data else [],
-                        'insights': insights
-                    }
-
                 response = self.ollama_client.generate(
-                    model=model_name,
+                    model="phi3",
                     prompt=prompt,
                     stream=False,
                     options={

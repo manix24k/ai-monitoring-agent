@@ -2,7 +2,7 @@ apiVersion: v1
 kind: ConfigMap
 metadata:
   name: ai-monitoring-agent-config
-  namespace: jupiter
+  namespace: mercury
 data:
   config.json: |
     {
@@ -15,27 +15,20 @@ data:
         }
       },
       "elasticsearch": {
-        "hosts": ["http://10.0.0.6:9200"],
+        "hosts": ["http://192.0.0.246:9200"],
         "username": "elastic",
-        "password": "",
-        "index_prefix": "*-*,-.*",
+        "password": "i9gpFYzuD4ndeGmkNM*p",
+        "index_prefix": "b2b-aggregation-*,cacheservice-*,cab-aggregation-*,fabbooking-*,sales-service-*,sales-*,tripmanagement-*,b2b-search-service-*,b2b-search-*,catalog-service-*,catalog-*,hyperguest-*,otaconsumer-*,gds-flight-*,expedia-service-*,expedia-*,conference-booking-*,booking-qc-service-*,booking-qc-*",
         "log_window_minutes": 720,
         "log_limit": 500,
         "trace_limit": 25
       },
       "monitoring": {
         "sampling_rate": 0.5,
-        "use_static_monitored_services": false,
-        "service_selection_source": "cluster",
-        "include_k8s_service_objects": false,
         "incident_log_window_minutes": 15,
         "use_kubectl": false,
         "use_kubectl_pod_health": true,
-        "pod_health_workers": 6,
         "use_sidecar_otel_traces": true,
-        "background_snapshot_enabled": true,
-        "background_snapshot_interval_seconds": 30,
-        "background_snapshot_window_minutes": 30,
         "otel_trace_file_path": "/var/otel/traces.json",
         "enable_otel_trace_retention": true,
         "otel_trace_retention_days": 2,
@@ -47,36 +40,13 @@ data:
         "trace_latency_threshold_ms": 1500,
         "incident_retention_hours": 24,
         "enable_deep_inspection": true,
-        "kubectl_timeout_seconds": 25,
-        "pods_cache_seconds": 45,
+        "kubectl_timeout_seconds": 10,
+        "pods_cache_seconds": 15,
         "pods_backoff_seconds": 60,
-        "discovery_cache_seconds": 90,
-        "deep_inspection_service_limit": 40,
-        "log_probe_retries": 3,
-        "log_probe_wait_seconds": 1.2,
-        "troubleshoot_log_probe_retries": 5,
-        "troubleshoot_log_probe_wait_seconds": 2.0,
-        "troubleshoot_log_tail_lines": 2000,
-        "troubleshoot_log_since_minutes": 120,
-        "troubleshoot_full_scan_enabled": true,
-        "troubleshoot_full_scan_since_minutes": 5,
-        "troubleshoot_full_scan_timeout_seconds": 45,
-        "discovery_namespaces": ["jupiter", "venus"],
-        "auto_select_per_namespace": 20,
-        "auto_select_total_limit": 40,
+        "discovery_namespaces": ["mercury", "earth", "mars"],
+        "auto_select_per_namespace": 5,
+        "auto_select_total_limit": 15,
         "auto_select_cache_seconds": 120,
-        "auto_select_stale_fallback_seconds": 900,
-        "service_status_window_cap_minutes": 60,
-        "service_status_window_cap_threshold": 100,
-        "full_status_cache_seconds": 90,
-        "strict_recent_error_max_services": 120,
-        "redis_cache": {
-          "enabled": false,
-          "url": "redis://redis:6379/0",
-          "ttl_seconds": 120,
-          "connect_timeout_seconds": 1.0,
-          "socket_timeout_seconds": 1.5
-        },
         "rate_limit": {
           "prometheus_queries_per_minute": 30,
           "check_interval": 60
@@ -93,35 +63,15 @@ data:
         "history_limit": 500,
         "adaptive_threshold_window": 100
       },
-      "llm": {
-        "api_url": "http://20.244.11.93/v1",
-        "api_key": "",
-        "model": "qwen3",
-        "timeout": 20
-      },
       "pr_automation": {
         "enabled": true,
-        "auto_create_pr": false,
+        "auto_create_pr": true,
         "repo_base_url": "https://github.com/fabhotelstech",
-        "target_branch": "develop_venus",
+        "target_branch": "develop_mercury",
         "fix_mode": "source_fix",
         "eligibility_mode": "permissive",
         "allow_analysis_report_pr": false,
-        "default_base_branch": "develop_venus",
-        "manifest_path_hints": [
-          "{namespace}/java17/{service}/deployment.yaml",
-          "{namespace}/java8/{service}/deployment.yaml",
-          "{namespace}/python/{service}/deployment.yaml"
-        ],
-        "k8s_manifest_repo": {
-          "repo_name": "k8s-manifest",
-          "repo_base_url": "https://github.com/fabhotelstech",
-          "target_branch": "develop_venus",
-          "environment_roots": {
-            "jupiter": ["jupiter/java17", "jupiter/java8", "jupiter/python", "jupiter"],
-            "venus": ["venus/java17", "venus/java8", "venus/python", "venus"]
-          }
-        },
+        "default_base_branch": "develop_mercury",
         "ignore_issue_patterns": [
           "(?i)insertpropertypendingcheckouttaskjob\\s*-->",
           "(?i)insertpropertypendingcheckintaskjob\\s*-->",
@@ -132,67 +82,36 @@ data:
         "repo_overrides": {
           "catalog": {
             "repo": "catalog-service",
-            "branch": "develop_venus"
+            "branch": "develop_earth"
           },
           "catalog-service": {
             "repo": "catalog-service",
-            "branch": "develop_venus"
+            "branch": "develop_earth"
           },
           "fabbooking": {
             "repo": "booking-service",
-            "branch": "develop_venus"
+            "branch": "develop_mercury"
           },
           "booking-service": {
             "repo": "booking-service",
-            "branch": "develop_venus"
+            "branch": "develop_mercury"
           },
           "aerospike": {
             "repo": "aerospike-service",
-            "branch": "develop_venus"
+            "branch": "develop_earth"
           },
           "bus-booking-search-service": {
             "repo": "bus-booking-search-service",
-            "branch": "develop_venus"
-          },
-          "bus-booking-search": {
-            "repo": "bus-booking-search-service",
-            "branch": "develop_venus"
-          },
-          "flight-booking": {
-            "repo": "flight-booking-service",
-            "branch": "develop_venus"
-          },
-          "flight-preprocessor": {
-            "repo": "flight-preprocessor-service",
-            "branch": "develop_venus"
-          },
-          "b2b-aggregation": {
-            "repo": "b2b-aggregation",
-            "branch": "develop_venus"
+            "branch": "main"
           },
           "conference-booking": {
             "repo": "conference-booking-service",
-            "branch": "develop_venus"
-          },
-          "conference-invoice": {
-            "repo": "conference-invoice-service",
-            "branch": "develop_venus"
+            "branch": "develop_earth"
           },
           "budgetmanagement": {
             "repo": "conference-booking-service",
-            "branch": "develop_venus"
-          },
-          "cab-booking": {
-            "repo": "cab-booking-service",
-            "branch": "develop_venus"
-          },
-          "cab-booking-service": {
-            "repo": "cab-booking-service",
-            "branch": "develop_venus"
-          },
-          "_shared_repos_": [
-            {"repo": "java-utils", "branch": "develop_venus"}
-          ]
+            "branch": "feature/aws_s3"
+          }
         }
       },
       "slack": {
@@ -203,7 +122,84 @@ data:
       },
       "max_selected_services": 20,
       "all_services_discovery_limit": 50,
-      "monitored_services": [],
+      "monitored_services": [
+        {
+          "name": "b2b-aggregation",
+          "namespace": "mercury"
+        },
+        {
+          "name": "cacheservice",
+          "namespace": "mercury"
+        },
+        {
+          "name": "cab-aggregation",
+          "namespace": "mercury"
+        },
+        {
+          "name": "fabbooking",
+          "namespace": "mercury"
+        },
+        {
+          "name": "sales-service",
+          "namespace": "mercury"
+        },
+        {
+          "name": "tripmanagement",
+          "namespace": "mercury"
+        },
+        {
+          "name": "b2b-search-service",
+          "namespace": "mercury"
+        },
+        {
+          "name": "catalog",
+          "namespace": "mercury"
+        },
+        {
+          "name": "hyperguest",
+          "namespace": "earth"
+        },
+        {
+          "name": "otaconsumer",
+          "namespace": "earth"
+        },
+        {
+          "name": "gds-flight",
+          "namespace": "earth"
+        },
+        {
+          "name": "expedia-service",
+          "namespace": "earth"
+        },
+        {
+          "name": "conference-booking",
+          "namespace": "earth"
+        },
+        {
+          "name": "booking-qc-service",
+          "namespace": "earth"
+        },
+        {
+          "name": "aerospike",
+          "namespace": "earth"
+        },
+        {
+          "name": "bus-booking-search-service",
+          "namespace": "mars"
+        },
+        {
+          "name": "bus-booking-search-service",
+          "namespace": "mercury"
+        },
+        {
+          "name": "conference-booking",
+          "namespace": "mars"
+        },
+        {
+          "name": "budgetmanagement",
+          "namespace": "mars"
+        }
+      ],
         "ignored_log_patterns": [
           "(?i)io\\.opentelemetry\\.exporter\\.internal\\.http\\.HttpExporter\\s*-\\s*Failed to export spans",
           "(?i)otel\\.javaagent.*failed to export spans",
@@ -227,71 +223,53 @@ data:
           "sampling": 1.0
         },
         {
-          "name": "flight-booking",
+          "name": "cacheservice",
           "priority": "high",
           "sampling": 1.0
         },
         {
-          "name": "flight-preprocessor",
+          "name": "cab-aggregation",
           "priority": "high",
           "sampling": 1.0
         },
         {
-          "name": "bus-booking-search",
+          "name": "fabbooking",
           "priority": "high",
           "sampling": 1.0
         },
         {
-          "name": "cab-booking",
+          "name": "sales-service",
+          "priority": "high",
+          "sampling": 1.0
+        },
+        {
+          "name": "catalog",
+          "priority": "high",
+          "sampling": 1.0
+        },
+        {
+          "name": "tripmanagement",
+          "priority": "high",
+          "sampling": 1.0
+        },
+        {
+          "name": "b2b-search-service",
+          "priority": "high",
+          "sampling": 1.0
+        },
+        {
+          "name": "hyperguest",
           "priority": "high",
           "sampling": 1.0
         }
-      ],
-      "codexa": {
-        "enabled": true,
-        "auto_detect": true,
-        "auto_analyze": false,
-        "auto_fix": false,
-        "poll_interval_seconds": 60,
-        "llm": {
-          "provider": "anthropic",
-          "model": "claude-sonnet-4-6",
-          "host": "http://127.0.0.1:11434",
-          "timeout": 120,
-          "max_tokens": 4096,
-          "temperature": 0.1
-        },
-        "github": {
-          "org": "fabhotelstech",
-          "default_branch": "develop_venus",
-          "pr_labels": ["ai-generated", "codexa-fix"]
-        },
-        "analysis": {
-          "max_files_per_issue": 10,
-          "max_context_lines": 100,
-          "verification_timeout": 120,
-          "workspace": "/var/otel/codexa-workspace"
-        },
-        "issue_types": [
-          "NullPointerException",
-          "SQLException",
-          "IllegalArgumentException",
-          "IndexOutOfBoundsException",
-          "ConfigurationException",
-          "ValidationException"
-        ],
-        "repo_mappings": {
-          "b2b-aggregation": "b2b-aggregation",
-          "jupiter/b2b-aggregation": "b2b-aggregation"
-        }
-      }
+      ]
     }
 ---
 apiVersion: v1
 kind: ConfigMap
 metadata:
   name: ai-monitoring-agent-otel-config
-  namespace: jupiter
+  namespace: mercury
 data:
   otel-collector-config.yaml: |
     receivers:

@@ -9,11 +9,11 @@
   },
   "elasticsearch": {
     "hosts": [
-      "http://10.0.0.6:9200"
+      "http://192.0.0.246:9200"
     ],
     "index_prefix": "b2b-aggregation-*,cacheservice-*,cab-aggregation-*,fabbooking-*,sales-service-*,sales-*,tripmanagement-*,b2b-search-service-*,b2b-search-*,catalog-service-*,catalog-*,hyperguest-*,otaconsumer-*,gds-flight-*,expedia-service-*,expedia-*,conference-booking-*,booking-qc-service-*,booking-qc-*",
     "username": "elastic",
-        "password": "",
+    "password": "i9gpFYzuD4ndeGmkNM*p",
     "log_window_minutes": 720,
     "trace_window_minutes": 120,
     "context_log_limit": 150,
@@ -23,17 +23,10 @@
   },
   "monitoring": {
     "sampling_rate": 0.5,
-    "use_static_monitored_services": false,
-    "service_selection_source": "cluster",
-    "include_k8s_service_objects": false,
     "incident_log_window_minutes": 15,
     "use_kubectl": false,
     "use_kubectl_pod_health": true,
-    "pod_health_workers": 6,
     "use_sidecar_otel_traces": true,
-    "background_snapshot_enabled": true,
-    "background_snapshot_interval_seconds": 30,
-    "background_snapshot_window_minutes": 30,
     "exception_signature_regex": "\\b([a-zA-Z0-9_.$]+(?:Exception|Error))\\b",
     "otel_trace_file_path": "/var/otel/traces.json",
     "enable_otel_trace_retention": true,
@@ -43,39 +36,17 @@
     "otel_trace_rotate_mb": 512,
     "otel_trace_retention_check_seconds": 300,
     "enable_deep_inspection": true,
-    "kubectl_timeout_seconds": 25,
-    "pods_cache_seconds": 45,
+    "kubectl_timeout_seconds": 10,
+    "pods_cache_seconds": 15,
     "pods_backoff_seconds": 60,
-    "discovery_cache_seconds": 90,
-    "deep_inspection_service_limit": 40,
-    "log_probe_retries": 3,
-    "log_probe_wait_seconds": 1.2,
-    "troubleshoot_log_probe_retries": 5,
-    "troubleshoot_log_probe_wait_seconds": 2.0,
-    "troubleshoot_log_tail_lines": 2000,
-    "troubleshoot_log_since_minutes": 120,
-    "troubleshoot_full_scan_enabled": true,
-    "troubleshoot_full_scan_since_minutes": 5,
-    "troubleshoot_full_scan_timeout_seconds": 45,
     "discovery_namespaces": [
-      "jupiter",
-      "venus"
+      "earth",
+      "mercury",
+      "mars"
     ],
-    "auto_select_per_namespace": 20,
-    "auto_select_total_limit": 40,
+    "auto_select_per_namespace": 5,
+    "auto_select_total_limit": 15,
     "auto_select_cache_seconds": 120,
-    "auto_select_stale_fallback_seconds": 900,
-    "service_status_window_cap_minutes": 60,
-    "service_status_window_cap_threshold": 100,
-    "full_status_cache_seconds": 90,
-    "strict_recent_error_max_services": 120,
-    "redis_cache": {
-      "enabled": false,
-      "url": "redis://redis:6379/0",
-      "ttl_seconds": 120,
-      "connect_timeout_seconds": 1.0,
-      "socket_timeout_seconds": 1.5
-    },
     "rate_limit": {
       "prometheus_queries_per_minute": 30,
       "check_interval": 60
@@ -135,6 +106,10 @@
     {
       "name": "budgetmanagement",
       "namespace": "mars"
+    },
+    {
+      "name": "tripmanagement",
+      "namespace": "mercury"
     }
   ],
   "ignored_log_patterns": [
@@ -143,7 +118,12 @@
     "(?i)otel\\.javaagent.*okhttp.*fabhotels-signoz-prod-otel-collector\\.signoz-prod11\\.svc",
     "(?i)fabhotels-signoz-prod-otel-collector\\.signoz-prod11\\.svc",
     "(?i)fabhotels-signoz-prod-otel-collector.*\\.svc\\.cluster\\.local(?::4318)?",
-    "(?i)org\\.apache\\.catalina\\.valves\\.ErrorReportValve\\.invoke\\(ErrorReportValve\\.java:92\\)"
+    "(?i)org\\.apache\\.catalina\\.valves\\.ErrorReportValve\\.invoke\\(ErrorReportValve\\.java:92\\)",
+    "(?i)insertpropertypendingcheckouttaskjob\\s*-->",
+    "(?i)insertpropertypendingcheckintaskjob\\s*-->",
+    "(?i)quartzscheduler_.*misfirehandler",
+    "(?i)localdatasourcejobstore.*misfirehandler.*couldn't retrieve trigger",
+    "(?i)org\\.quartz\\.jobpersistenceexception"
   ],
   "anomaly_detection": {
     "contamination": 0.1,
@@ -159,36 +139,27 @@
     "adaptive_threshold_window": 100,
     "enabled": true
   },
-  "llm": {
-    "api_url": "http://20.244.11.93/v1",
-    "api_key": "",
-    "model": "qwen3",
-    "timeout": 20
-  },
   "pr_automation": {
     "enabled": true,
-    "auto_create_pr": false,
+    "auto_create_pr": true,
     "repo_base_url": "https://github.com/fabhotelstech",
-    "target_branch": "azure",
+    "target_branch": "develop_mercury",
     "fix_mode": "source_fix",
     "eligibility_mode": "permissive",
-    "allow_analysis_report_pr": false,
-    "manifest_path_hints": [
-      "{namespace}/java17/{service}/deployment.yaml",
-      "{namespace}/java8/{service}/deployment.yaml",
-      "{namespace}/python/{service}/deployment.yaml"
-    ],
-    "k8s_manifest_repo": {
-      "repo_name": "k8s-manifest",
-      "repo_base_url": "https://github.com/fabhotelstech",
-      "target_branch": "azure",
-      "environment_roots": {
-        "jupiter": ["jupiter/java17", "jupiter/java8", "jupiter/python", "jupiter"],
-        "venus": ["venus/java17", "venus/java8", "venus/python", "venus"]
-      }
-    },
+    "allow_analysis_report_pr": true,
     "ignore_issue_patterns": [
-      "(?i)fabhotels-signoz-prod-otel-collector\\.signoz-prod11\\.svc"
+      "(?i)insertpropertypendingcheckouttaskjob\\s*-->",
+      "(?i)insertpropertypendingcheckintaskjob\\s*-->",
+      "(?i)quartzscheduler_.*misfirehandler",
+      "(?i)localdatasourcejobstore.*misfirehandler.*couldn't retrieve trigger",
+      "(?i)org\\.quartz\\.jobpersistenceexception",
+      "(?i)java\\.net\\.connectexception",
+      "(?i)connection refused",
+      "(?i)connectexception.*connection refused",
+      "(?i)failed to connect",
+      "(?i)connection\\s+refused\\s*\\(",
+      "(?i)connection\\s+refused\\s+at\\s+java",
+      "(?i)failed\\s+to\\s+connect.*ai-monitoring-agent"
     ],
     "workspace": "/tmp/ai-agent-pr-work",
     "max_candidate_files": 12,
@@ -207,13 +178,57 @@
         "repo": "conference-booking-service",
         "branch": "develop_earth"
       },
-      "conference-invoice": {
-        "repo": "conference-invoice-service",
-        "branch": "azure"
-      },
       "budgetmanagement": {
         "repo": "conference-booking-service",
         "branch": "feature/aws_s3"
+      },
+      "tripmanagement": {
+        "repo": "trip-management-service",
+        "branch": "develop_mercury"
+      },
+      "gds-flight": {
+        "repo": "gds-flight-service",
+        "branch": "develop_earth"
+      },
+      "expedia-service": {
+        "repo": "expedia-service",
+        "branch": "develop_earth"
+      },
+      "hyperguest": {
+        "repo": "hyperguest",
+        "branch": "develop_earth"
+      },
+      "otaconsumer": {
+        "repo": "ota-consumer-service",
+        "branch": "develop_earth"
+      },
+      "cab-aggregation": {
+        "repo": "cab-aggregation-service",
+        "branch": "develop_mercury"
+      },
+      "catalog-service": {
+        "repo": "catalog-service",
+        "branch": "develop_mercury"
+      },
+      "sales-service": {
+        "repo": "sales-service",
+        "branch": "develop_mercury"
+      },
+      "b2b-aggregation": {
+        "repo": "b2b-aggregation-service",
+        "branch": "develop_mercury"
+      },
+      "b2b-search-service": {
+        "repo": "b2b-search-service",
+        "branch": "develop_mercury"
+      },
+      "fabbooking": {
+        "repo": "fabbooking",
+        "branch": "develop_mercury"
+      },
+      "booking-qc-service": {
+        "repo": "booking-qc-service",
+        "branch": "develop_earth"
       }
     }
   },
@@ -242,56 +257,5 @@
   ],
   "signoz": {
     "url": ""
-  },
-  "argocd": {
-    "enabled": true,
-    "url": "",
-    "token": "",
-    "insecure_skip_verify": true,
-    "app_name_pattern": "{service}",
-    "namespace_app_patterns": {
-      "venus": "{service}",
-      "jupiter": "{service}"
-    },
-    "sync_check_interval_seconds": 15,
-    "timeout_seconds": 10
-  },
-  "jenkins": {
-    "max_concurrent_builds": 1,
-    "stage_poll_interval_seconds": 3,
-    "fix_tracking_enabled": true,
-    "fix_cooldown_minutes": 30
-  },
-  "custom_error_patterns": [
-    {
-      "pattern": "(?i)payment.*failed",
-      "issue": "PaymentFailed",
-      "reason": "Payment processing failed",
-      "root_cause": "Payment gateway error - check payment service logs and gateway status"
-    },
-    {
-      "pattern": "(?i)inventory.*insufficient",
-      "issue": "InsufficientInventory",
-      "reason": "Inventory not available",
-      "root_cause": "Requested inventory not available - check stock levels"
-    },
-    {
-      "pattern": "(?i)booking.*conflict",
-      "issue": "BookingConflict",
-      "reason": "Booking conflict detected",
-      "root_cause": "Concurrent booking conflict - implement retry or check availability"
-    },
-    {
-      "pattern": "(?i)rate.*limit.*exceeded",
-      "issue": "RateLimitExceeded",
-      "reason": "API rate limit hit",
-      "root_cause": "Too many requests - implement backoff or increase rate limits"
-    },
-    {
-      "pattern": "(?i)circuit.*breaker.*open",
-      "issue": "CircuitBreakerOpen",
-      "reason": "Circuit breaker tripped",
-      "root_cause": "Downstream service failing - check dependency health"
-    }
-  ]
+  }
 }

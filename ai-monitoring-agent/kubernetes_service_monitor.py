@@ -6,8 +6,6 @@ Monitors services directly by reading their logs
 import subprocess
 import json
 import re
-import time
-import threading
 from datetime import datetime, timedelta
 from typing import Dict, List, Optional
 import logging
@@ -16,25 +14,9 @@ import signal
 logger = logging.getLogger(__name__)
 
 class KubernetesServiceMonitor:
-    def __init__(self, namespace: str = "jupiter"):
+    def __init__(self, namespace: str = "mercury"):
         self.namespace = namespace
         self.runtime_config = None
-        # Structured error parsing patterns
-        self._issue_patterns = {
-            'CrashLoopBackOff': r'(?i)crashloopbackoff',
-            'ImagePullBackOff': r'(?i)(imagepullbackoff|errimagepull)',
-            'OOMKilled': r'(?i)(oomkilled|outofmemory|out of memory)',
-            'FailedScheduling': r'(?i)(failedscheduling|unschedulable)',
-            'CreateContainerConfigError': r'(?i)createcontainerconfigerror',
-            'CreateContainerError': r'(?i)createcontainererror',
-            'RunContainerError': r'(?i)runcontainererror',
-            'InvalidImageName': r'(?i)invalidimagename',
-            'PodPending': r'(?i)(pending|unschedulable)',
-            'ConnectionRefused': r'(?i)connection\s*refused',
-            'Timeout': r'(?i)(timeout|timed\s*out|deadline\s*exceeded)',
-            'DNSError': r'(?i)(dns\s*resolution\s*failed|unknownhostexception)',
-            'ServiceUnavailable': r'(?i)service.*unavailable',
-        }
         self.discovery_namespaces = [namespace]
         self.max_selected_services = 25
         self.selected_services = []
@@ -43,16 +25,8 @@ class KubernetesServiceMonitor:
         self._namespace_pods_cache_ts = {}
         self._namespace_pods_backoff_until = {}
         self._namespace_pods_last_error = {}
-        self._namespace_pods_locks = {}
         self._pod_event_cache = {}
         self._pod_event_cache_ts = {}
-        self._pod_log_cache = {}
-        self._pod_log_cache_ts = {}
-        self._namespace_workloads_cache = {}
-        self._namespace_workloads_cache_ts = {}
-        self._namespace_workloads_locks = {}
-        self._discover_services_cache = []
-        self._discover_services_cache_ts = None
         # Load services from config file
         self.service_patterns = {}
         self._load_services_from_config()
@@ -65,121 +39,6 @@ class KubernetesServiceMonitor:
         value = int(monitoring_cfg.get('kubectl_timeout_seconds', 10) or 10)
         return max(3, min(value, 30))
 
-    def parse_structured_error(self, reason_text: str, pod_info: Optional[Dict] = None) -> Dict:
-        """Parse error context into structured issue/reason/root_cause fields.
-
-        Args:
-            reason_text: Raw error/reason text from pod status or events
-            pod_info: Optional pod information dict with status, restarts, etc.
-
-        Returns:
-            Dict with 'issue', 'reason', 'root_cause' keys
-        """
-        result = {
-            'issue': '',
-            'reason': '',
-            'root_cause': ''
-        }
-
-        if not reason_text:
-            return result
-
-        reason_lower = str(reason_text).lower()
-        pod_info = pod_info or {}
-
-        # Detect issue type from patterns
-        for issue_name, pattern in self._issue_patterns.items():
-            if re.search(pattern, reason_text):
-                result['issue'] = issue_name
-                break
-
-        # If no pattern matched, try to extract from structured text
-        if not result['issue']:
-            # Look for common issue markers in the text
-            if 'error' in reason_lower:
-                result['issue'] = 'Error'
-            elif 'failed' in reason_lower:
-                result['issue'] = 'Failed'
-            elif 'exception' in reason_lower:
-                result['issue'] = 'Exception'
-
-        # Extract exit code and build reason
-        exit_match = re.search(r'exit[_\s]*code[=:\s]*(\d+)', reason_text, re.IGNORECASE)
-        if exit_match:
-            code = exit_match.group(1)
-            reason_parts = [f"Exit code {code}"]
-            if code == '137':
-                reason_parts.append("(SIGKILL/OOM)")
-            elif code == '1':
-                reason_parts.append("(Application error)")
-            elif code == '139':
-                reason_parts.append("(Segmentation fault)")
-            elif code == '143':
-                reason_parts.append("(SIGTERM)")
-            elif code == '0':
-                reason_parts.append("(Normal exit)")
-            result['reason'] = ' '.join(reason_parts)
-
-        # Extract restart info for reason
-        restart_count = int(pod_info.get('restarts', 0) or 0)
-        restart_cause = str(pod_info.get('restart_cause', '') or '').strip()
-        if restart_count > 0 and not result['reason']:
-            result['reason'] = f"{restart_count} restart(s)"
-            if restart_cause:
-                result['reason'] += f" due to {restart_cause}"
-
-        # Build reason from error message if not set
-        if not result['reason']:
-            # Extract key details from the error text
-            if 'back-off' in reason_lower and 'pulling' in reason_lower:
-                result['reason'] = 'Image pull backoff'
-            elif 'manifest unknown' in reason_lower:
-                result['reason'] = 'Image tag not found'
-            elif 'unauthorized' in reason_lower or 'access denied' in reason_lower:
-                result['reason'] = 'Registry authentication failed'
-            elif 'insufficient cpu' in reason_lower:
-                result['reason'] = 'Not enough CPU resources'
-            elif 'insufficient memory' in reason_lower:
-                result['reason'] = 'Not enough memory resources'
-            elif 'node affinity' in reason_lower:
-                result['reason'] = 'Node affinity constraints not met'
-            elif result['issue']:
-                result['reason'] = result['issue']
-
-        # Build actionable root cause
-        if result['issue'] == 'OOMKilled':
-            result['root_cause'] = 'Container exceeded memory limit and was killed by kernel OOM killer'
-        elif result['issue'] == 'CrashLoopBackOff':
-            if restart_cause:
-                result['root_cause'] = f"Container repeatedly crashing: {restart_cause}"
-            else:
-                result['root_cause'] = 'Container crashes repeatedly after startup - check application logs'
-        elif result['issue'] == 'ImagePullBackOff':
-            if 'manifest unknown' in reason_lower:
-                result['root_cause'] = 'Image tag does not exist in registry - verify image:tag'
-            elif 'unauthorized' in reason_lower or 'access denied' in reason_lower:
-                result['root_cause'] = 'Missing or invalid registry credentials - check imagePullSecrets'
-            else:
-                result['root_cause'] = 'Cannot pull container image - verify image name and registry access'
-        elif result['issue'] == 'FailedScheduling':
-            if 'insufficient' in reason_lower:
-                result['root_cause'] = 'Cluster lacks resources to schedule pod - scale cluster or reduce requests'
-            else:
-                result['root_cause'] = 'Pod cannot be scheduled - check node selectors, taints, and affinity rules'
-        elif result['issue'] == 'CreateContainerConfigError':
-            result['root_cause'] = 'Container configuration error - check ConfigMaps, Secrets, and volume mounts'
-        elif result['issue'] == 'ConnectionRefused':
-            result['root_cause'] = 'Target service not accepting connections - verify service is running and port is correct'
-        elif result['issue'] == 'Timeout':
-            result['root_cause'] = 'Request timed out - check network connectivity and service health'
-        elif result['issue'] == 'DNSError':
-            result['root_cause'] = 'DNS resolution failed - verify service name and DNS configuration'
-        elif not result['root_cause'] and reason_text:
-            # Use cleaned up reason text as root cause fallback
-            result['root_cause'] = re.sub(r'\s+', ' ', reason_text).strip()[:200]
-
-        return result
-
     def _get_pods_cache_ttl(self) -> int:
         cfg = self.runtime_config or {}
         monitoring_cfg = cfg.get('monitoring', {}) if isinstance(cfg, dict) else {}
@@ -188,12 +47,6 @@ class KubernetesServiceMonitor:
 
     def _get_namespace_pods(self, namespace: str) -> List[Dict]:
         """Return namespace pods with short TTL cache to avoid kubectl storm."""
-        lock = self._namespace_pods_locks.setdefault(namespace, threading.Lock())
-        with lock:
-            return self._get_namespace_pods_locked(namespace)
-
-    def _get_namespace_pods_locked(self, namespace: str) -> List[Dict]:
-        """Locked body for namespace pod retrieval."""
         now = datetime.now()
         ttl = self._get_pods_cache_ttl()
         timeout_seconds = self._get_kubectl_timeout()
@@ -240,91 +93,6 @@ class KubernetesServiceMonitor:
         self._namespace_pods_last_error.pop(namespace, None)
         return items
 
-    def _get_namespace_workloads(self, namespace: str) -> List[Dict]:
-        """Return namespace deployments/statefulsets with short TTL cache."""
-        lock = self._namespace_workloads_locks.setdefault(namespace, threading.Lock())
-        with lock:
-            return self._get_namespace_workloads_locked(namespace)
-
-    def _get_namespace_workloads_locked(self, namespace: str) -> List[Dict]:
-        """Locked body for namespace workload retrieval."""
-        now = datetime.now()
-        ttl = self._get_pods_cache_ttl()
-        timeout_seconds = self._get_kubectl_timeout()
-
-        cached_ts = self._namespace_workloads_cache_ts.get(namespace)
-        cached_items = self._namespace_workloads_cache.get(namespace)
-        if cached_ts and isinstance(cached_items, list):
-            age = (now - cached_ts).total_seconds()
-            if age < ttl:
-                return cached_items
-
-        cmd = ['kubectl', 'get', 'deployments,statefulsets,daemonsets', '-n', namespace, '-o', 'json']
-        result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds)
-        if result.returncode != 0:
-            if isinstance(cached_items, list):
-                return cached_items
-            return []
-
-        data = json.loads(result.stdout)
-        items = data.get('items', [])
-        self._namespace_workloads_cache[namespace] = items
-        self._namespace_workloads_cache_ts[namespace] = now
-        return items
-
-    def _get_desired_replicas_for_service(self, service_name: str, namespace: str) -> Dict:
-        """Resolve desired replicas from matched Deployment/StatefulSet."""
-        out = {'desired_replicas': None, 'workload_kind': '', 'workload_name': ''}
-        try:
-            workloads = self._get_namespace_workloads(namespace)
-            if not workloads:
-                return out
-
-            candidates = self._service_name_candidates(service_name)
-            best = None
-            best_score = -1
-
-            for item in workloads:
-                metadata = item.get('metadata', {}) if isinstance(item.get('metadata', {}), dict) else {}
-                spec = item.get('spec', {}) if isinstance(item.get('spec', {}), dict) else {}
-                name = str(metadata.get('name', '') or '').strip()
-                if not name:
-                    continue
-                replicas = spec.get('replicas', None)
-                kind = str(item.get('kind', '') or '')
-                if kind.lower() == 'daemonset':
-                    status_obj = item.get('status', {}) if isinstance(item.get('status', {}), dict) else {}
-                    replicas = status_obj.get('desiredNumberScheduled', None)
-                try:
-                    replicas_int = int(replicas if replicas is not None else 1)
-                except Exception:
-                    replicas_int = 1
-
-                score = 0
-                for candidate in candidates:
-                    if not candidate:
-                        continue
-                    if name == candidate:
-                        score = max(score, 100)
-                    elif self._pod_name_matches_candidate(name, candidate):
-                        score = max(score, 70)
-                    elif self._pod_name_matches_candidate(candidate, name):
-                        score = max(score, 60)
-
-                if score > best_score:
-                    best = {
-                        'desired_replicas': replicas_int,
-                        'workload_kind': kind,
-                        'workload_name': name
-                    }
-                    best_score = score
-
-            if best is not None and best_score > 0:
-                return best
-            return out
-        except Exception:
-            return out
-
     def _service_name_candidates(self, service_name: str) -> List[str]:
         """Build candidate names for workload/pod matching."""
         base = (service_name or '').strip()
@@ -336,17 +104,6 @@ class KubernetesServiceMonitor:
             candidates.append(base[:-8])
         if base.endswith('-svc'):
             candidates.append(base[:-4])
-
-        # Token-level synonyms for common workload naming differences
-        # (e.g., elasticsearch <-> es).
-        expanded = []
-        for item in list(candidates):
-            tokenized = item.split('-')
-            if 'elasticsearch' in tokenized:
-                expanded.append('-'.join('es' if t == 'elasticsearch' else t for t in tokenized))
-            if 'es' in tokenized:
-                expanded.append('-'.join('elasticsearch' if t == 'es' else t for t in tokenized))
-        candidates.extend(expanded)
 
         # Keep order, remove duplicates
         ordered = []
@@ -371,28 +128,11 @@ class KubernetesServiceMonitor:
         if pod.startswith(f"{cand}-"):
             return True
 
-        def _strip_runtime_suffixes(name: str) -> str:
-            value = str(name or '').strip().lower()
-            if not value:
-                return ''
-            # Deployment pod: <name>-<pod-template-hash>-<suffix>
-            value = re.sub(r'-[a-f0-9]{8,10}-[a-z0-9]{4,}$', '', value)
-            # ReplicaSet owner name: <name>-<pod-template-hash>
-            value = re.sub(r'-[a-f0-9]{8,10}$', '', value)
-            # StatefulSet pod: <name>-<ordinal>
-            value = re.sub(r'-\d+$', '', value)
-            return value
-
-        pod_base = _strip_runtime_suffixes(pod)
-        cand_base = _strip_runtime_suffixes(cand)
-        if pod_base and cand_base and pod_base == cand_base:
-            return True
-
         # Hyphen-insensitive exact workload-name match only.
         # Avoid prefix matches that can cross-link distinct services
         # (e.g., tripmanagement vs trip-management-search).
-        pod_compact = pod_base.replace('-', '') if pod_base else pod.replace('-', '')
-        cand_compact = cand_base.replace('-', '') if cand_base else cand.replace('-', '')
+        pod_compact = pod.replace('-', '')
+        cand_compact = cand.replace('-', '')
         if pod_compact == cand_compact:
             return True
 
@@ -410,7 +150,7 @@ class KubernetesServiceMonitor:
             services = {}
 
             monitoring_cfg = config.get('monitoring', {})
-            configured_namespaces = monitoring_cfg.get('discovery_namespaces', ['jupiter', 'venus'])
+            configured_namespaces = monitoring_cfg.get('discovery_namespaces', ['earth', 'mercury', 'mars'])
             if isinstance(configured_namespaces, list) and configured_namespaces:
                 self.discovery_namespaces = configured_namespaces
 
@@ -453,15 +193,27 @@ class KubernetesServiceMonitor:
             return services
         except Exception as e:
             logger.warning(f"Could not load services from config: {e}")
-            # Keep dynamic mode only; avoid static service fallbacks.
-            self.selected_services = []
+            # Fallback to hardcoded services
+            self.selected_services = [
+                {'name': 'cacheservice', 'namespace': self.namespace},
+                {'name': 'bus-aggregation', 'namespace': self.namespace},
+                {'name': 'channel-manager-su', 'namespace': self.namespace},
+                {'name': 'otaconsumer', 'namespace': self.namespace},
+                {'name': 'travelport', 'namespace': self.namespace}
+            ]
             self.ignored_log_patterns = [
                 r'(?i)io\.opentelemetry\.exporter\.internal\.http\.HttpExporter\s*-\s*Failed to export spans',
                 r'(?i)otel\.javaagent.*failed to export spans',
                 r'(?i)fabhotels-signoz-prod-otel-collector.*\.svc\.cluster\.local(?::4318)?',
                 r'(?i)org\.apache\.catalina\.valves\.ErrorReportValve\.invoke\(ErrorReportValve\.java:92\)'
             ]
-            self.service_patterns = {}
+            self.service_patterns = {
+                'cacheservice': r'cacheservice',
+                'bus-aggregation': r'bus-aggregation',
+                'channel-manager-su': r'channel-manager-su',
+                'otaconsumer': r'otaconsumer',
+                'travelport': r'travelport'
+            }
             return self.service_patterns
 
     def apply_runtime_config(self, config: Dict):
@@ -496,10 +248,6 @@ class KubernetesServiceMonitor:
         Returns:
             List of log entries with timestamp and message
         """
-        monitoring_cfg = (self.runtime_config or {}).get('monitoring', {}) if isinstance(self.runtime_config, dict) else {}
-        if isinstance(monitoring_cfg, dict) and not bool(monitoring_cfg.get('use_kubectl', True)):
-            return []
-
         # Check if kubectl is working
         if not self.kubectl_working:
             logger.warning("kubectl is not working, returning empty logs")
@@ -795,7 +543,6 @@ class KubernetesServiceMonitor:
                 restart_cause = ''
                 restart_exit_code = ''
                 restart_finished_at = ''
-                restart_count = sum(cs.get('restartCount', 0) for cs in container_statuses)
 
                 if not ready and phase_lower in {'pending', 'failed', 'unknown'}:
                     reason = str(status.get('reason', '') or '')
@@ -826,25 +573,6 @@ class KubernetesServiceMonitor:
                     if events_summary:
                         reason = events_summary if not reason else f"{reason} | {events_summary}"
 
-                generic_reason = str(reason or '').strip().lower()
-                should_enrich_from_logs = (not ready) or restart_count > 0
-                if should_enrich_from_logs and ((not reason) or generic_reason in {'error', 'failed', 'unknown'} or 'crashloopbackoff' in generic_reason):
-                    log_summary = self._get_pod_log_summary(
-                        pod_name,
-                        namespace,
-                        minutes=5,
-                        include_previous=restart_count > 0
-                    )
-                    if log_summary:
-                        reason = f"{reason} | {log_summary}" if reason else log_summary
-
-                if reason and (
-                    re.search(r'(?i)fabhotels-signoz-prod-otel-collector\.signoz-prod11\.svc\.cluster\.local', reason)
-                    or re.search(r'(?i)signoz-prod11\.svc\.cluster\.local', reason)
-                    or any(re.search(str(pattern), reason, re.IGNORECASE) for pattern in self.ignored_log_patterns)
-                ):
-                    reason = ''
-
                 # Capture concrete restart cause from previous container termination.
                 for container in container_statuses:
                     last_state = container.get('lastState', {}) if isinstance(container.get('lastState', {}), dict) else {}
@@ -856,36 +584,16 @@ class KubernetesServiceMonitor:
                         if not reason and restart_cause:
                             reason = restart_cause
                         break
-
-                if 'crashloopbackoff' in str(reason or '').lower() and restart_cause:
-                    termination_hint = f"last_termination={restart_cause}"
-                    if restart_exit_code:
-                        termination_hint += f" exit_code={restart_exit_code}"
-                    if restart_finished_at:
-                        termination_hint += f" finished_at={restart_finished_at}"
-                    if termination_hint.lower() not in str(reason).lower():
-                        reason = f"{reason} | {termination_hint}" if reason else termination_hint
                 
-                # Parse structured error fields
-                structured_error = self.parse_structured_error(reason, {
-                    'restarts': restart_count,
-                    'restart_cause': restart_cause,
-                    'restart_exit_code': restart_exit_code
-                })
-
                 pod_info = {
                     'name': pod_name,
                     'status': phase,
                     'ready': ready,
-                    'restarts': restart_count,
+                    'restarts': sum(cs.get('restartCount', 0) for cs in container_statuses),
                     'reason': reason,
                     'restart_cause': restart_cause,
                     'restart_exit_code': restart_exit_code,
-                    'restart_finished_at': restart_finished_at,
-                    # Structured error fields for 3-column display
-                    'issue': structured_error.get('issue', ''),
-                    'error_reason': structured_error.get('reason', ''),
-                    'root_cause': structured_error.get('root_cause', '')
+                    'restart_finished_at': restart_finished_at
                 }
                 pods.append(pod_info)
                 
@@ -895,12 +603,8 @@ class KubernetesServiceMonitor:
             
             # Determine overall status
             if not pods:
-                workload = self._get_desired_replicas_for_service(service_name, namespace)
-                desired_replicas = workload.get('desired_replicas', None)
-                if desired_replicas is not None and int(desired_replicas) == 0:
-                    status = 'scaled_down'
                 # Fallback: if service endpoints are ready, treat as healthy even if pod name match failed
-                elif self._has_ready_endpoints(service_name, namespace):
+                if self._has_ready_endpoints(service_name, namespace):
                     status = 'healthy'
                 else:
                     status = 'no_pods'
@@ -908,50 +612,10 @@ class KubernetesServiceMonitor:
                 status = 'healthy'
             else:
                 status = 'unhealthy'
-
-            workload = self._get_desired_replicas_for_service(service_name, namespace)
-            desired_replicas = workload.get('desired_replicas', None)
-                
-            actionable_reason_tokens = [
-                'imagepullbackoff',
-                'errimagepull',
-                'crashloopbackoff',
-                'failedscheduling',
-                'oomkilled',
-                'createcontainerconfigerror',
-                'createcontainererror',
-                'runcontainererror',
-                'containerstatusunknown',
-                'invalidimagename',
-                'back-off pulling image',
-                'no nodes available',
-                'insufficient cpu',
-                'insufficient memory'
-            ]
-
-            def _is_actionable_reason(text: str) -> bool:
-                value = str(text or '').strip().lower()
-                if not value:
-                    return False
-                return any(token in value for token in actionable_reason_tokens)
-
-            issue_pods_count = 0
-            for pod in pods:
-                ready_flag = bool(pod.get('ready', False))
-                reason_text = str(pod.get('reason', '') or '')
-                if (not ready_flag) or _is_actionable_reason(reason_text):
-                    issue_pods_count += 1
                 
             return {
                 'status': status,
                 'pods': pods,
-                'total_pods': len(pods),
-                'ready_pods': sum(1 for pod in pods if bool(pod.get('ready', False))),
-                'running_pods': sum(1 for pod in pods if str(pod.get('status', '')).lower() == 'running'),
-                'issue_pods': issue_pods_count,
-                'desired_replicas': desired_replicas,
-                'workload_kind': workload.get('workload_kind', ''),
-                'workload_name': workload.get('workload_name', ''),
                 'namespace': namespace
             }
             
@@ -1020,376 +684,6 @@ class KubernetesServiceMonitor:
         except Exception:
             return ''
 
-    def _get_pod_log_summary(self, pod_name: str, namespace: str, minutes: int = 5, include_previous: bool = False) -> str:
-        """Get a concise actionable snippet from recent pod logs."""
-        try:
-            cache_key = f"{namespace}/{pod_name}:{minutes}:{int(include_previous)}"
-            cached_ts = self._pod_log_cache_ts.get(cache_key)
-            if cached_ts and (datetime.now() - cached_ts).total_seconds() < 20:
-                return str(self._pod_log_cache.get(cache_key, '') or '')
-
-            timeout_seconds = self._get_kubectl_timeout()
-            commands = [[
-                'kubectl', 'logs', pod_name,
-                '-n', namespace,
-                f'--since={max(1, int(minutes))}m',
-                '--tail=120'
-            ]]
-            if include_previous:
-                commands.append([
-                    'kubectl', 'logs', pod_name,
-                    '-n', namespace,
-                    '--previous',
-                    f'--since={max(1, int(minutes))}m',
-                    '--tail=120'
-                ])
-
-            actionable_patterns = [
-                r'(?i)(exception|error|fatal|oomkilled|outofmemory|imagepullbackoff|errimagepull|crashloopbackoff)',
-                r'(?i)(failed\s+to\s+bind\s+properties|unsatisfieddependencyexception|beancreationexception)',
-                r'(?i)(connection\s+refused|timed\s*out|deadline\s+exceeded|http\s*5\d\d)'
-            ]
-            hard_ignored_patterns = [
-                r'(?i)fabhotels-signoz-prod-otel-collector\.signoz-prod11\.svc\.cluster\.local',
-                r'(?i)signoz-prod11\.svc\.cluster\.local'
-            ]
-
-            monitoring_cfg = (self.runtime_config or {}).get('monitoring', {}) if isinstance(self.runtime_config, dict) else {}
-            retries = int(monitoring_cfg.get('log_probe_retries', 3) or 3)
-            retries = max(1, min(retries, 5))
-            retry_sleep = float(monitoring_cfg.get('log_probe_wait_seconds', 1.2) or 1.2)
-            retry_sleep = max(0.2, min(retry_sleep, 3.0))
-
-            for attempt in range(retries):
-                for cmd in commands:
-                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds)
-                    if result.returncode != 0 or not result.stdout:
-                        continue
-
-                    lines = [line.strip() for line in result.stdout.splitlines() if line.strip()]
-                    for line in reversed(lines):
-                        if any(re.search(pattern, line) for pattern in hard_ignored_patterns):
-                            continue
-                        if any(re.search(str(pattern), line, re.IGNORECASE) for pattern in self.ignored_log_patterns):
-                            continue
-                        if any(re.search(pattern, line) for pattern in actionable_patterns):
-                            compact = re.sub(r'\s+', ' ', line).strip()
-                            summary = compact[:260] + ('...' if len(compact) > 260 else '')
-                            self._pod_log_cache[cache_key] = summary
-                            self._pod_log_cache_ts[cache_key] = datetime.now()
-                            return summary
-
-                if attempt < retries - 1:
-                    time.sleep(retry_sleep)
-
-            self._pod_log_cache[cache_key] = ''
-            self._pod_log_cache_ts[cache_key] = datetime.now()
-            return ''
-        except Exception:
-            return ''
-
-    def _get_pod_resource_snapshot(self, pod_name: str, namespace: str) -> str:
-        """Fetch concise CPU/memory usage for pod when metrics-server is available."""
-        try:
-            cache_key = f"top:{namespace}/{pod_name}"
-            cached_ts = self._pod_event_cache_ts.get(cache_key)
-            if cached_ts and (datetime.now() - cached_ts).total_seconds() < 20:
-                return str(self._pod_event_cache.get(cache_key, '') or '')
-
-            cmd = ['kubectl', 'top', 'pod', pod_name, '-n', namespace, '--no-headers']
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=5)
-            if result.returncode != 0:
-                return ''
-            line = str(result.stdout or '').strip().splitlines()
-            if not line:
-                return ''
-            parts = re.split(r'\s+', line[0].strip())
-            if len(parts) < 3:
-                return ''
-            summary = f"cpu={parts[1]} mem={parts[2]}"
-            self._pod_event_cache[cache_key] = summary
-            self._pod_event_cache_ts[cache_key] = datetime.now()
-            return summary
-        except Exception:
-            return ''
-
-    def _extract_actionable_log_line(self, lines: List[str]) -> str:
-        """Pick the most actionable line from log output."""
-        if not lines:
-            return ''
-
-        priority_patterns = [
-            r'(?i)caused by:',
-            r'(?i)(exception|fatal|traceback|panic|segmentation fault)',
-            r'(?i)(outofmemory|oomkilled|kill process out of memory)',
-            r'(?i)(connection refused|timed out|deadline exceeded|unknownhostexception)',
-            r'(?i)(imagepullbackoff|errimagepull|crashloopbackoff|failedscheduling)',
-            r'(?i)(failed to|unable to|cannot |permission denied|no such file|not found)'
-        ]
-
-        cleaned_lines = [re.sub(r'\s+', ' ', str(line or '').strip()) for line in lines if str(line or '').strip()]
-        if not cleaned_lines:
-            return ''
-
-        ignore_patterns = [
-            r'(?i)\binside\s+ping\b',
-            r'(?i)\bping\s+request\s+received\b',
-            r'(?i)\breturning\s+from\s+ping\b',
-            r'(?i)\bkube-probe/\d',
-            r'(?i)^\s*info\b'
-        ]
-        candidate_lines = [
-            line for line in cleaned_lines
-            if not any(re.search(pat, line) for pat in ignore_patterns)
-        ]
-        if not candidate_lines:
-            candidate_lines = cleaned_lines
-
-        for pattern in priority_patterns:
-            for line in reversed(candidate_lines):
-                if re.search(pattern, line):
-                    return line[:420] + ('...' if len(line) > 420 else '')
-
-        return ''
-
-    def _score_log_line(self, line: str) -> int:
-        """Score log lines for troubleshooting relevance."""
-        text = re.sub(r'\s+', ' ', str(line or '').strip())
-        if not text:
-            return -1000
-
-        lower = text.lower()
-        score = 0
-
-        if any(token in lower for token in ['inside ping', 'ping request received', 'returning from ping', 'kube-probe/']):
-            score -= 80
-        if 'suppressed:' in lower and 'terminated with an error' in lower:
-            score -= 35
-
-        if re.search(r'\berror\b', text, re.IGNORECASE):
-            score += 35
-        if re.search(r'\bexception\b', text, re.IGNORECASE):
-            score += 40
-        if re.search(r'\bcaused by\b', text, re.IGNORECASE):
-            score += 30
-        if re.search(r'(?i)application\s+run\s+failed', text):
-            score += 55
-        if re.search(r'(?i)unable\s+to\s+instantiate\s+factory\s+class', text):
-            score += 50
-        if re.search(r'(?i)illegalargumentexception', text):
-            score += 35
-        if re.search(r'\b(timeout|timed out|connection refused|unknownhostexception|oomkilled|outofmemory|crashloopbackoff|failedscheduling)\b', text, re.IGNORECASE):
-            score += 45
-        if re.search(r'\b(status|code|http)\D{0,8}(4\d\d|5\d\d)\b', text, re.IGNORECASE):
-            score += 30
-        if re.search(r'\b(INFO)\b', text) and not re.search(r'\b(error|exception|fatal|failed|timeout|bad_request|\b4\d\d\b|\b5\d\d\b)\b', text, re.IGNORECASE):
-            score -= 25
-
-        return score
-
-    def _get_pod_log_evidence(self, pod_name: str, namespace: str, minutes: int = 20) -> Dict:
-        """Collect deeper current/previous log evidence for troubleshooting."""
-        evidence = {
-            'best_line': '',
-            'source': '',
-            'excerpt': [],
-            'error_lines': []
-        }
-        try:
-            timeout_seconds = max(8, self._get_kubectl_timeout())
-            monitoring_cfg = (self.runtime_config or {}).get('monitoring', {}) if isinstance(self.runtime_config, dict) else {}
-            retries = int(monitoring_cfg.get('troubleshoot_log_probe_retries', 5) or 5)
-            retries = max(1, min(retries, 8))
-            retry_sleep = float(monitoring_cfg.get('troubleshoot_log_probe_wait_seconds', 2.0) or 2.0)
-            retry_sleep = max(0.3, min(retry_sleep, 5.0))
-            tail_lines = int(monitoring_cfg.get('troubleshoot_log_tail_lines', 2000) or 2000)
-            tail_lines = max(200, min(tail_lines, 10000))
-            since_minutes = int(monitoring_cfg.get('troubleshoot_log_since_minutes', max(20, int(minutes))) or max(20, int(minutes)))
-            since_minutes = max(10, min(since_minutes, 360))
-            full_scan_enabled = bool(monitoring_cfg.get('troubleshoot_full_scan_enabled', True))
-            full_scan_since_minutes = int(monitoring_cfg.get('troubleshoot_full_scan_since_minutes', 5) or 5)
-            full_scan_since_minutes = max(1, min(full_scan_since_minutes, 30))
-            full_scan_timeout_seconds = int(monitoring_cfg.get('troubleshoot_full_scan_timeout_seconds', max(timeout_seconds * 4, 30)) or max(timeout_seconds * 4, 30))
-            full_scan_timeout_seconds = max(15, min(full_scan_timeout_seconds, 120))
-            ansi_escape = re.compile(r'\x1B\[[0-?]*[ -/]*[@-~]')
-            error_patterns = [
-                r'(?i)\berror\b',
-                r'(?i)\bexception\b',
-                r'(?i)\bfatal\b',
-                r'(?i)\btraceback\b',
-                r'(?i)\bpanic\b',
-                r'(?i)oomkilled|outofmemory',
-                r'(?i)\bfailed\b',
-                r'(?i)\bdenied\b',
-                r'(?i)timeout|timed out|deadline exceeded',
-                r'(?i)\bbad_request\b',
-                r'(?i)\b(status|code|http)\D{0,8}(4\d\d|5\d\d)\b',
-                r'(?i)\b(4\d\d|5\d\d)\s+(bad request|unauthorized|forbidden|not found|internal server error|service unavailable)\b'
-            ]
-            hard_ignored = [
-                r'(?i)fabhotels-signoz-prod-otel-collector\.signoz-prod11\.svc\.cluster\.local',
-                r'(?i)signoz-prod11\.svc\.cluster\.local'
-            ]
-
-            commands = [
-                (
-                    'current',
-                    [
-                        'kubectl', 'logs', pod_name,
-                        '-n', namespace,
-                        '--all-containers=true',
-                        f'--since={since_minutes}m',
-                        f'--tail={tail_lines}'
-                    ]
-                ),
-                (
-                    'previous',
-                    [
-                        'kubectl', 'logs', pod_name,
-                        '-n', namespace,
-                        '--all-containers=true',
-                        '--previous',
-                        f'--since={since_minutes}m',
-                        f'--tail={tail_lines}'
-                    ]
-                )
-            ]
-
-            candidates = []
-
-            for attempt in range(retries):
-                for source, cmd in commands:
-                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=timeout_seconds)
-                    if result.returncode != 0 or not result.stdout:
-                        continue
-                    lines = [ansi_escape.sub('', line) for line in result.stdout.splitlines() if str(line or '').strip()]
-                    if not lines:
-                        continue
-
-                    error_lines = []
-                    for line in lines:
-                        text = str(line or '').strip()
-                        if not text:
-                            continue
-                        if any(re.search(pattern, text) for pattern in hard_ignored):
-                            continue
-                        if any(re.search(pattern, text) for pattern in self.ignored_log_patterns):
-                            continue
-                        if re.search(r'(?i)\binfo\b', text) and not re.search(r'(?i)\b(error|exception|fatal|failed|timeout|bad_request|4\d\d|5\d\d)\b', text):
-                            continue
-                        if any(re.search(pattern, text) for pattern in error_patterns):
-                            compact = re.sub(r'\s+', ' ', text).strip()
-                            error_lines.append(compact[:420] + ('...' if len(compact) > 420 else ''))
-
-                    # Keep unique order
-                    unique_error_lines = []
-                    seen = set()
-                    for item in error_lines:
-                        key = item.lower()
-                        if key in seen:
-                            continue
-                        seen.add(key)
-                        unique_error_lines.append(item)
-
-                    best = self._extract_actionable_log_line(unique_error_lines)
-                    excerpt_source = unique_error_lines if unique_error_lines else [re.sub(r'\s+', ' ', ln).strip() for ln in lines]
-                    excerpt = excerpt_source[-25:]
-
-                    excerpt = [ln[:320] + ('...' if len(ln) > 320 else '') for ln in excerpt if ln]
-
-                    evidence['best_line'] = best
-                    evidence['source'] = source
-                    evidence['excerpt'] = excerpt
-                    evidence['error_lines'] = unique_error_lines[:25]
-
-                    for line in unique_error_lines[:60]:
-                        candidates.append((self._score_log_line(line), source, line))
-
-                if attempt < retries - 1:
-                    time.sleep(retry_sleep)
-
-            # Slow fallback: scan all logs from last N minutes when quick tail scan misses.
-            # This is intentionally heavier and used only for troubleshooting mode.
-            if full_scan_enabled:
-                full_scan_commands = [
-                    (
-                        'current-fullscan',
-                        [
-                            'kubectl', 'logs', pod_name,
-                            '-n', namespace,
-                            '--all-containers=true',
-                            f'--since={full_scan_since_minutes}m'
-                        ]
-                    ),
-                    (
-                        'previous-fullscan',
-                        [
-                            'kubectl', 'logs', pod_name,
-                            '-n', namespace,
-                            '--all-containers=true',
-                            '--previous',
-                            f'--since={full_scan_since_minutes}m'
-                        ]
-                    )
-                ]
-
-                for source, cmd in full_scan_commands:
-                    result = subprocess.run(cmd, capture_output=True, text=True, timeout=full_scan_timeout_seconds)
-                    if result.returncode != 0 or not result.stdout:
-                        continue
-
-                    lines = [ansi_escape.sub('', line) for line in result.stdout.splitlines() if str(line or '').strip()]
-                    if not lines:
-                        continue
-
-                    error_lines = []
-                    for line in lines:
-                        text = str(line or '').strip()
-                        if not text:
-                            continue
-                        if any(re.search(pattern, text) for pattern in hard_ignored):
-                            continue
-                        if any(re.search(pattern, text) for pattern in self.ignored_log_patterns):
-                            continue
-                        if re.search(r'(?i)\binfo\b', text) and not re.search(r'(?i)\b(error|exception|fatal|failed|timeout|bad_request|4\d\d|5\d\d)\b', text):
-                            continue
-                        if any(re.search(pattern, text) for pattern in error_patterns):
-                            compact = re.sub(r'\s+', ' ', text).strip()
-                            error_lines.append(compact[:420] + ('...' if len(compact) > 420 else ''))
-
-                    unique_error_lines = []
-                    seen = set()
-                    for item in error_lines:
-                        key = item.lower()
-                        if key in seen:
-                            continue
-                        seen.add(key)
-                        unique_error_lines.append(item)
-
-                    best = self._extract_actionable_log_line(unique_error_lines)
-                    excerpt_source = unique_error_lines if unique_error_lines else [re.sub(r'\s+', ' ', ln).strip() for ln in lines]
-                    excerpt = excerpt_source[-30:]
-                    excerpt = [ln[:320] + ('...' if len(ln) > 320 else '') for ln in excerpt if ln]
-
-                    evidence['best_line'] = best
-                    evidence['source'] = source
-                    evidence['excerpt'] = excerpt
-                    evidence['error_lines'] = unique_error_lines[:30]
-
-                    for line in unique_error_lines[:100]:
-                        candidates.append((self._score_log_line(line), source, line))
-
-            if candidates:
-                candidates.sort(key=lambda item: item[0], reverse=True)
-                top_score, top_source, top_line = candidates[0]
-                if top_score > -60:
-                    evidence['best_line'] = top_line
-                    evidence['source'] = top_source
-
-            return evidence
-        except Exception:
-            return evidence
-
     def _run_exec_file_checks(self, pod_name: str, namespace: str) -> Dict:
         """Run lightweight in-pod checks for common runtime config/code paths."""
         checks = {
@@ -1454,17 +748,11 @@ class KubernetesServiceMonitor:
             pod_name = target_pod.get('name', 'unknown')
             reason = target_pod.get('reason', '')
             events = self._get_pod_event_summary(pod_name, namespace)
-            resource = self._get_pod_resource_snapshot(pod_name, namespace)
-            log_hint = self._get_pod_log_summary(pod_name, namespace, minutes=10, include_previous=True)
             summary = f"Pod {pod_name} not ready"
             if reason:
                 summary += f": {reason}"
             if events:
                 summary += f" | events: {events}"
-            if resource:
-                summary += f" | resources: {resource}"
-            if log_hint:
-                summary += f" | log: {log_hint}"
             return {
                 'mode': 'describe',
                 'pod': pod_name,
@@ -1474,12 +762,9 @@ class KubernetesServiceMonitor:
         pod_name = ready_pod.get('name', 'unknown')
         file_checks = self._run_exec_file_checks(pod_name, namespace)
         findings = file_checks.get('findings', [])
-        resource = self._get_pod_resource_snapshot(pod_name, namespace)
         summary = f"Exec inspection on pod {pod_name}"
         if findings:
             summary += f": {' | '.join(findings[:2])}"
-        if resource:
-            summary += f" | resources: {resource}"
 
         return {
             'mode': 'exec',
@@ -1489,179 +774,21 @@ class KubernetesServiceMonitor:
             'findings': findings
         }
 
-    def _get_pod_describe_excerpt(self, pod_name: str, namespace: str, max_lines: int = 12) -> str:
-        """Return concise describe excerpt focused on failure evidence."""
-        try:
-            cmd = ['kubectl', 'describe', 'pod', pod_name, '-n', namespace]
-            result = subprocess.run(cmd, capture_output=True, text=True, timeout=8)
-            if result.returncode != 0 or not result.stdout:
-                return ''
-
-            interesting = []
-            patterns = [
-                r'(?i)reason:\s*',
-                r'(?i)state:\s*',
-                r'(?i)last state:\s*',
-                r'(?i)exit code:\s*',
-                r'(?i)oomkilled|crashloopbackoff|imagepullbackoff|errimagepull|failedscheduling|insufficient\s+(cpu|memory)',
-                r'(?i)events:',
-                r'(?i)warning\s+'
-            ]
-            for line in result.stdout.splitlines():
-                text = line.strip()
-                if not text:
-                    continue
-                if any(re.search(pat, text) for pat in patterns):
-                    interesting.append(text)
-                if len(interesting) >= max_lines:
-                    break
-            return ' | '.join(interesting)
-        except Exception:
-            return ''
-
-    def run_troubleshooting(self, service_name: str, namespace: Optional[str] = None, progress_callback=None) -> Dict:
-        """Run focused troubleshooting workflow and return structured diagnostics."""
-        namespace = namespace or self.namespace
-
-        def _progress(stage: str, percent: int, detail: str):
-            if callable(progress_callback):
-                try:
-                    progress_callback(stage, int(percent), str(detail or ''))
-                except Exception:
-                    pass
-
-        report = {
-            'service': service_name,
-            'namespace': namespace,
-            'status': 'unknown',
-            'summary': '',
-            'pods': [],
-            'root_causes': []
-        }
-
-        _progress('init', 5, 'Collecting pod status')
-        pod_status = self.get_pod_status(service_name, namespace=namespace)
-        report['status'] = str(pod_status.get('status', 'unknown') or 'unknown')
-        pods = pod_status.get('pods', []) if isinstance(pod_status.get('pods', []), list) else []
-        report['pod_counts'] = {
-            'total': int(pod_status.get('total_pods', 0) or 0),
-            'running': int(pod_status.get('running_pods', 0) or 0),
-            'ready': int(pod_status.get('ready_pods', 0) or 0),
-            'issue': int(pod_status.get('issue_pods', 0) or 0)
-        }
-
-        if not pods:
-            report['summary'] = f'No pods found for {namespace}/{service_name}'
-            report['root_causes'].append(report['summary'])
-            _progress('done', 100, report['summary'])
-            return report
-
-        # Prioritize unstable pods first to improve root-cause quality.
-        ordered_pods = sorted(
-            pods,
-            key=lambda pod: (
-                0 if not bool(pod.get('ready', False)) else 1,
-                -int(pod.get('restarts', 0) or 0)
-            )
-        )
-        target_pods = ordered_pods[:3]
-        per_pod_step = max(10, int(70 / max(1, len(target_pods))))
-        current = 15
-
-        for pod in target_pods:
-            pod_name = str(pod.get('name', 'unknown') or 'unknown')
-            _progress('pod', current, f'Analyzing pod {pod_name}')
-
-            reason = str(pod.get('reason', '') or '').strip()
-            event_summary = self._get_pod_event_summary(pod_name, namespace)
-            describe_excerpt = self._get_pod_describe_excerpt(pod_name, namespace)
-            resource = self._get_pod_resource_snapshot(pod_name, namespace)
-            log_current = self._get_pod_log_summary(pod_name, namespace, minutes=10, include_previous=False)
-            log_previous = self._get_pod_log_summary(pod_name, namespace, minutes=20, include_previous=True)
-            log_evidence = self._get_pod_log_evidence(pod_name, namespace, minutes=20)
-
-            if (not log_previous) and str(log_evidence.get('source', '')) == 'previous':
-                log_previous = str(log_evidence.get('best_line', '') or '')
-            if (not log_current) and str(log_evidence.get('source', '')) == 'current':
-                log_current = str(log_evidence.get('best_line', '') or '')
-
-            pod_report = {
-                'name': pod_name,
-                'status': str(pod.get('status', '') or ''),
-                'ready': bool(pod.get('ready', False)),
-                'restarts': int(pod.get('restarts', 0) or 0),
-                'reason': reason,
-                'event_summary': event_summary,
-                'describe_excerpt': describe_excerpt,
-                'resource': resource,
-                'log_current': log_current,
-                'log_previous': log_previous,
-                'log_evidence_line': str(log_evidence.get('best_line', '') or ''),
-                'log_evidence_source': str(log_evidence.get('source', '') or ''),
-                'log_excerpt': log_evidence.get('excerpt', []) if isinstance(log_evidence.get('excerpt', []), list) else [],
-                'error_lines': log_evidence.get('error_lines', []) if isinstance(log_evidence.get('error_lines', []), list) else [],
-                'restart_cause': str(pod.get('restart_cause', '') or ''),
-                'restart_exit_code': str(pod.get('restart_exit_code', '') or ''),
-                'restart_finished_at': str(pod.get('restart_finished_at', '') or '')
-            }
-            report['pods'].append(pod_report)
-
-            for candidate in [
-                pod_report['log_evidence_line'],
-                (pod_report['error_lines'][0] if pod_report['error_lines'] else ''),
-                log_previous,
-                log_current,
-                describe_excerpt,
-                event_summary,
-                reason,
-                pod_report['restart_cause']
-            ]:
-                text = str(candidate or '').strip()
-                if not text:
-                    continue
-                if text not in report['root_causes']:
-                    report['root_causes'].append(text)
-
-            current = min(90, current + per_pod_step)
-
-        if report['root_causes']:
-            report['summary'] = report['root_causes'][0]
-        else:
-            report['summary'] = f'No explicit root cause extracted for {namespace}/{service_name}'
-
-        _progress('done', 100, 'Troubleshooting completed')
-        return report
-
     def discover_services(self, namespaces: Optional[List[str]] = None) -> List[Dict]:
         """Discover monitorable targets from cluster namespaces."""
         if not self.kubectl_working:
             return []
 
         target_namespaces = namespaces or self.discovery_namespaces or [self.namespace]
-        now = datetime.now()
-        monitoring_cfg = (self.runtime_config or {}).get('monitoring', {}) if isinstance(self.runtime_config, dict) else {}
-        discovery_cache_seconds = int(monitoring_cfg.get('discovery_cache_seconds', 90) or 90)
-        discovery_cache_seconds = max(15, min(discovery_cache_seconds, 600))
-        if (
-            self._discover_services_cache_ts is not None and
-            isinstance(self._discover_services_cache, list) and
-            self._discover_services_cache and
-            (now - self._discover_services_cache_ts).total_seconds() < discovery_cache_seconds
-        ):
-            return list(self._discover_services_cache)
-
         discovered_map = {}
-        include_k8s_services = bool(monitoring_cfg.get('include_k8s_service_objects', False))
 
         for namespace in target_namespaces:
             try:
                 resources = [
                     ('deployments', 'deployment'),
                     ('statefulsets', 'statefulset'),
-                    ('daemonsets', 'daemonset')
+                    ('services', 'service')
                 ]
-                if include_k8s_services:
-                    resources.append(('services', 'service'))
 
                 for resource_type, source in resources:
                     cmd = ['kubectl', 'get', resource_type, '-n', namespace, '-o', 'json']
@@ -1687,15 +814,6 @@ class KubernetesServiceMonitor:
 
         discovered = list(discovered_map.values())
         discovered.sort(key=lambda s: (s.get('namespace', ''), s.get('name', '')))
-        if discovered:
-            self._discover_services_cache = list(discovered)
-            self._discover_services_cache_ts = now
-            return discovered
-
-        # Keep last known-good discovered services on transient kubectl failures.
-        if isinstance(self._discover_services_cache, list) and self._discover_services_cache:
-            return list(self._discover_services_cache)
-
         return discovered
     
     def get_all_services_status(self, minutes: int = 5) -> Dict:

@@ -1,6 +1,0 @@
-apiVersion: v2
-name: ai-monitoring-agent
-description: AI Monitoring Agent for Prometheus and SigNoz
-type: application
-version: 0.1.0
-appVersion: "1.0.0"

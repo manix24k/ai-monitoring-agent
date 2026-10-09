@@ -2,11 +2,9 @@ apiVersion: apps/v1
 kind: Deployment
 metadata:
   name: ai-monitoring-agent
-  namespace: jupiter
+  namespace: mercury
   labels:
     app: ai-monitoring-agent
-  annotations:
-    argocd.argoproj.io/sync-options: Replace=true
 spec:
   replicas: 0
   selector:
@@ -22,182 +20,29 @@ spec:
         fsGroup: 10001
       containers:
       - name: ai-monitoring-agent
-        image: fabhotelsdev.azurecr.io/fabhotels-development/ai-monitoring-agent:jupiter-474
-        imagePullPolicy: Always
-        # Ollama now runs as its own Deployment (see ollama-deployment.yaml).
-        # Override the image CMD so this pod does NOT also start `ollama serve`
-        # and compete for CPU with the monitoring app.
-        command: ["sh", "-c", "export PATH=$PATH:/usr/local/bin && python web_dashboard.py"]
+        image: 266970247417.dkr.ecr.ap-south-1.amazonaws.com/fabhotels-development/fabhotels-registry/ai-monitoring-agent:203
         ports:
         - containerPort: 5000
+        - containerPort: 11434
         env:
         - name: FLASK_ENV
           value: "production"
-        - name: AI_API_URL
-          value: "http://20.244.11.93/v1"
-        - name: AI_MODEL_NAME
-          value: "qwen3"
-        - name: AI_API_TIMEOUT
-          value: "20"
-        - name: AI_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: ai-monitoring-agent-secrets
-              key: AI_API_KEY
-              optional: false
-        - name: OLLAMA_ENABLED
-          value: "true"
+        - name: OLLAMA_MODELS
+          value: "/app/models"
         - name: OLLAMA_MODEL
-          value: "qwen2.5:7b-instruct-q4_K_M"
-        - name: OLLAMA_HOST
-          value: "http://ollama:11434"
-        - name: REDIS_URL
-          value: "redis://ai-monitoring-agent-redis.jupiter.svc.cluster.local:6380/0"
-        - name: LEARNING_STORE_PATH
-          value: "/var/otel/rca-learning"
-        # Jenkins integration
-        - name: JENKINS_IMAGE_AUTO_REBUILD_ENABLED
-          value: "true"
-        - name: JENKINS_URL
-          value: "https://ci.fabmailers.in"
-        - name: JENKINS_DISPATCHER_JOB
-          value: "AI-AGENT-BOT"
-        - name: JENKINS_BOT_MAX_CONCURRENT
-          value: "1"
-        - name: JENKINS_JOB_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: ai-monitoring-agent-jenkins
-              key: JENKINS_JOB_TOKEN
-              optional: false
-        - name: JENKINS_USER
-          valueFrom:
-            secretKeyRef:
-              name: ai-monitoring-agent-jenkins
-              key: JENKINS_USER
-              optional: true
-        - name: JENKINS_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: ai-monitoring-agent-jenkins
-              key: JENKINS_TOKEN
-              optional: true
+          value: "phi3:mini"
         - name: GH_TOKEN
           valueFrom:
             secretKeyRef:
-              name: ai-agent-service-github
+              name: ai-monitoring-agent-secrets
               key: GITHUB_TOKEN
               optional: true
         - name: GITHUB_TOKEN
           valueFrom:
             secretKeyRef:
-              name: ai-agent-service-github
+              name: ai-monitoring-agent-secrets
               key: GITHUB_TOKEN
               optional: true
-        # ArgoCD integration
-        - name: ARGOCD_URL
-          valueFrom:
-            secretKeyRef:
-              name: ai-agent-argocd-secret
-              key: argocd-url
-              optional: false
-        - name: ARGOCD_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: ai-agent-argocd-secret
-              key: argocd-token
-              optional: false
-        - name: ELASTICSEARCH_USERNAME
-          valueFrom:
-            secretKeyRef:
-              name: ai-monitoring-agent-secrets
-              key: elasticsearch-username
-              optional: false
-        - name: ELASTICSEARCH_PASSWORD
-          valueFrom:
-            secretKeyRef:
-              name: ai-monitoring-agent-secrets
-              key: elasticsearch-password
-              optional: false
-        # Gemini API Key (for CodeXA)
-        - name: GEMINI_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: ai-monitoring-agent-secrets
-              key: GEMINI_API_KEY
-              optional: true
-        # Anthropic Claude API Key (for CodeXA — select model anthropic:claude-sonnet-4-6 in UI)
-        - name: ANTHROPIC_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: codexa-anthropic-secret
-              key: ANTHROPIC_API_KEY
-              optional: true
-        # Paid GPT / OpenAI-compatible LLM for CodeXA (optional — falls back to Ollama if secret absent)
-        - name: CODEX_GPT_API_KEY
-          valueFrom:
-            secretKeyRef:
-              name: codex-gpt-secret
-              key: CODEX_GPT_API_KEY
-              optional: true
-        - name: CODEX_GPT_BASE_URL
-          valueFrom:
-            secretKeyRef:
-              name: codex-gpt-secret
-              key: CODEX_GPT_BASE_URL
-              optional: true
-        - name: CODEX_GPT_MODEL
-          valueFrom:
-            secretKeyRef:
-              name: codex-gpt-secret
-              key: CODEX_GPT_MODEL
-              optional: true
-        # Slack notifications — Bot Token via chat.postMessage
-        - name: SLACK_BOT_TOKEN
-          valueFrom:
-            secretKeyRef:
-              name: slack-secret
-              key: SLACK_BOT_TOKEN
-              optional: true
-        - name: SLACK_CHANNEL
-          value: "C0BDLHPLB24"
-        # CodeXA Configuration (Auto Code Fix Engine)
-        - name: CODEXA_LLM_PROVIDER
-          value: "anthropic"
-        - name: CODEXA_LLM_MODEL
-          value: "claude-sonnet-4-6"
-        - name: CODEXA_LLM_HOST
-          value: "http://ollama:11434"
-        - name: CODEXA_LLM_TIMEOUT
-          value: "900"
-        - name: CODEXA_LLM_MAX_TOKENS
-          value: "2048"
-        - name: CODEXA_LLM_TEMPERATURE
-          value: "0.1"
-        - name: CODEXA_AGENT_URL
-          value: "http://127.0.0.1:5000"
-        - name: CODEXA_PUBLIC_URL
-          value: "https://jupiter.fabmailers.in"
-        - name: CODEXA_AGENT_PREFIX
-          value: "/ai-agent"
-        - name: CODEXA_POLL_INTERVAL
-          value: "60"
-        - name: CODEXA_DETECT_WINDOW_MINUTES
-          value: "360"
-        - name: CODEXA_GITHUB_ORG
-          value: "fabhotelstech"
-        - name: CODEXA_GITHUB_BRANCH
-          value: "develop_venus"
-        - name: CODEXA_WORKSPACE
-          value: "/var/otel/codexa-workspace"
-        - name: CODEXA_MAX_FILES
-          value: "2"
-        - name: CODEXA_VERIFY_TIMEOUT
-          value: "0"
-        - name: CODEXA_ALLOWED_NAMESPACES
-          value: "venus,jupiter"
-        - name: CODEXA_ALLOWED_SERVICES
-          value: "b2b-aggregation,flight-booking,flight-preprocessor,bus-booking-search,cab-booking"
         volumeMounts:
         - name: config-volume
           mountPath: /app/config.json
@@ -230,21 +75,21 @@ spec:
           periodSeconds: 10
           timeoutSeconds: 5
       - name: otel-collector-sidecar
-        image: otel/opentelemetry-collector-contrib:0.102.1
-        imagePullPolicy: IfNotPresent
+        image: otel/opentelemetry-collector-contrib:0.100.0
         securityContext:
           runAsUser: 10001
           runAsGroup: 10001
           runAsNonRoot: true
+        command:
+          - /otelcol-contrib
         args:
-          - "--config=/etc/otelcol-contrib/config.yaml"
+          - "--config=/conf/otel-collector-config.yaml"
         ports:
         - containerPort: 4317
         - containerPort: 4318
         volumeMounts:
         - name: otel-collector-config
-          mountPath: /etc/otelcol-contrib/config.yaml
-          subPath: otel-collector-config.yaml
+          mountPath: /conf
         - name: otel-shared-volume
           mountPath: /var/otel
       volumes:
@@ -259,5 +104,3 @@ spec:
       - name: otel-shared-volume
         persistentVolumeClaim:
           claimName: ai-monitoring-agent-otel-pvc-v2
-      nodeSelector:
-        node-pool: compset-scraper

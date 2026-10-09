@@ -13,8 +13,8 @@ from sklearn.feature_extraction.text import TfidfVectorizer
 from sklearn.metrics.pairwise import cosine_similarity
 from sklearn.cluster import DBSCAN
 import pandas as pd
+import ollama
 from sklearn.utils.validation import check_is_fitted
-from llm_client import LLMClient
 
 class LearningEngine:
     def __init__(self, model_dir="./models", history_limit: int = 500, feedback_limit: int = 500, knowledge_limit: int = 1000):
@@ -30,8 +30,20 @@ class LearningEngine:
         self.knowledge_base = {}
         self.feedback_rules = {}
         self.last_training = None
-        self.llm_client = LLMClient()
+        self.ollama_client = None
+        self._initialize_ollama()
         self._load_models()
+        
+    def _initialize_ollama(self):
+        """Initialize Ollama client for LLM capabilities"""
+        try:
+            # Test connection to Ollama
+            response = ollama.list()
+            self.ollama_client = ollama
+            print("Ollama connection successful for learning engine")
+        except Exception as e:
+            print(f"Warning: Could not connect to Ollama for learning engine: {e}")
+            self.ollama_client = None
             
     def _load_models(self):
         """Load trained models if they exist"""
@@ -254,7 +266,7 @@ class LearningEngine:
     def classify_error(self, error_text: str) -> str:
         """Classify error using trained model or Phi-3 as fallback"""
         # Try traditional ML approach first
-        if self.error_classifier is not None and error_text:
+        if self.error_classifier and error_text:
             try:
                 check_is_fitted(self.error_classifier)
                 vectorizer = TfidfVectorizer(max_features=1000, stop_words='english')
@@ -266,8 +278,8 @@ class LearningEngine:
                 # Fall back to LLM/classic unknown without breaking monitoring loop
                 pass
         
-        # Use configured LLM backend for error classification
-        if error_text:
+        # Use Phi-3 model via Ollama for error classification
+        if self.ollama_client and error_text:
             try:
                 prompt = f"""Classify the following error message into one of these categories:
                 timeout, connection, memory, database, authentication, configuration, pod_failure, image_pull, unknown
@@ -277,7 +289,17 @@ class LearningEngine:
 
                 Respond with only the category name, nothing else."""
 
-                classification = self.llm_client.generate(prompt=prompt, temperature=0.3).strip().lower()
+                response = self.ollama_client.generate(
+                    model=os.getenv("OLLAMA_MODEL", "phi3:mini"),
+                    prompt=prompt,
+                    stream=False,
+                    options={
+                        "temperature": 0.3,
+                        "top_p": 0.9
+                    }
+                )
+
+                classification = response['response'].strip().lower()
                 valid_categories = ['timeout', 'connection', 'memory', 'database', 'authentication', 'configuration', 'pod_failure', 'image_pull', 'unknown']
                 
                 # Validate classification
@@ -287,7 +309,7 @@ class LearningEngine:
                         
                 return "unknown"
             except Exception as e:
-                print(f"Error classifying error with LLM: {e}")
+                print(f"Error classifying error with Phi-3: {e}")
         
         return "unknown"
             
@@ -416,8 +438,8 @@ class LearningEngine:
         logs = incident.get('logs', [])
         metrics = incident.get('metrics', {})
         
-        # Use configured LLM backend for generating remedial actions
-        if logs or metrics:
+        # Use Phi-3 model via Ollama for generating remedial actions
+        if self.ollama_client and (logs or metrics):
             try:
                 # Prepare context for LLM
                 log_samples = [log.get('body', log.get('message', '')) for log in logs[:5]]  # First 5 log entries
@@ -436,15 +458,24 @@ class LearningEngine:
 
                 Respond with only the actions, one per line, without any additional explanation."""
 
-                llm_text = self.llm_client.generate(prompt=prompt, temperature=0.5)
+                response = self.ollama_client.generate(
+                    model=os.getenv("OLLAMA_MODEL", "phi3:mini"),
+                    prompt=prompt,
+                    stream=False,
+                    options={
+                        "temperature": 0.5,
+                        "top_p": 0.9,
+                        "stop": ["\n\n"]
+                    }
+                )
 
                 # Parse actions from response
-                actions = [line.strip() for line in llm_text.strip().split('\n') if line.strip()]
+                actions = [line.strip() for line in response['response'].strip().split('\n') if line.strip()]
                 if actions:
                     return actions[:3]  # Limit to top 3 actions
                     
             except Exception as e:
-                print(f"Error generating remedial actions with LLM: {e}")
+                print(f"Error generating remedial actions with Phi-3: {e}")
         
         # Rule-based actions from incident evidence before generic fallback
         lower_logs = " ".join([str(log.get('body', log.get('message', ''))).lower() for log in logs[:8]])
